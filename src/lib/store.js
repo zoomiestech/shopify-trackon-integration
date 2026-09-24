@@ -121,13 +121,13 @@ export async function getShipment(orderId) {
 export async function upsertShipment(orderId, patch) {
   const key = String(orderId);
 
+  // Never allow patch.orderId to conflict with the immutable lookup key.
+  const { orderId: _ignoredOrderId, ...safePatch } = patch || {};
+
   const doc = await Shipment.findOneAndUpdate(
     { orderId: key },
     {
-      $set: {
-        ...patch,
-        orderId: key,
-      },
+      $set: safePatch,
       $setOnInsert: {
         orderId: key,
       },
