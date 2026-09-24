@@ -5,44 +5,58 @@ import { getShopifyAccessToken } from "./shopify-auth.js";
 export async function shopifyGraphql(
   query,
   variables = {},
-  shop = config.shopify.shop,
+  shop = config.shopify.shop
 ) {
-  if (!shop) throw new Error("Shopify shop is not configured.");
+  if (!shop) {
+    throw new Error("Shopify shop is not configured.");
+  }
 
   const token = await getShopifyAccessToken(shop);
-  const url = `https://${shop}/admin/api/${config.shopify.apiVersion}/graphql.json`;
+
+  const url =
+    `https://${shop}/admin/api/` +
+    `${config.shopify.apiVersion}/graphql.json`;
 
   const { data } = await axios.post(
     url,
-    { query, variables },
+    {
+      query,
+      variables,
+    },
     {
       headers: {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": token,
       },
       timeout: 20000,
-    },
+    }
   );
 
   if (data.errors?.length) {
-    throw new Error(`Shopify GraphQL error: ${JSON.stringify(data.errors)}`);
+    throw new Error(
+      `Shopify GraphQL error: ${JSON.stringify(data.errors)}`
+    );
   }
 
   return data.data;
 }
 
-export async function testShopifyConnection(shop = config.shopify.shop) {
+export async function testShopifyConnection(
+  shop = config.shopify.shop
+) {
   const data = await shopifyGraphql(
     `query BridgeShopTest {
       shop {
         id
         name
         myshopifyDomain
-        primaryDomain { url }
+        primaryDomain {
+          url
+        }
       }
     }`,
     {},
-    shop,
+    shop
   );
 
   return data.shop;
@@ -50,7 +64,7 @@ export async function testShopifyConnection(shop = config.shopify.shop) {
 
 export async function getFulfillmentOrders(
   orderGid,
-  shop = config.shopify.shop,
+  shop = config.shopify.shop
 ) {
   const data = await shopifyGraphql(
     `query BridgeFulfillmentOrders($id: ID!) {
@@ -67,12 +81,16 @@ export async function getFulfillmentOrders(
         }
       }
     }`,
-    { id: orderGid },
-    shop,
+    {
+      id: orderGid,
+    },
+    shop
   );
 
   if (!data.order) {
-    throw new Error(`Shopify order not found: ${orderGid}`);
+    throw new Error(
+      `Shopify order not found: ${orderGid}`
+    );
   }
 
   return data.order;
@@ -82,8 +100,24 @@ function chooseFulfillmentOrder(nodes = []) {
   return nodes.find(
     (fo) =>
       !["CLOSED", "CANCELLED"].includes(fo.status) &&
-      fo.requestStatus !== "SUBMITTED",
+      fo.requestStatus !== "SUBMITTED"
   );
+}
+
+function buildTrackingUrl(awb) {
+  const template = config.trackon.publicTrackingUrl;
+
+  if (!template) {
+    return undefined;
+  }
+
+  const encodedAwb = encodeURIComponent(String(awb));
+
+  if (template.includes("{awb}")) {
+    return template.replaceAll("{awb}", encodedAwb);
+  }
+
+  return template;
 }
 
 export async function createShopifyFulfillment({
@@ -94,61 +128,178 @@ export async function createShopifyFulfillment({
   const order = await getFulfillmentOrders(orderGid, shop);
 
   if (order.cancelledAt) {
-    throw new Error("Shopify order is cancelled; fulfillment not created.");
-  }
-
-  const fo = chooseFulfillmentOrder(order.fulfillmentOrders?.nodes || []);
-
-  if (!fo) {
     throw new Error(
-      "No open Shopify fulfillment order found. The order may already be fulfilled, cancelled, on hold, or assigned differently.",
+      "Shopify order is cancelled; fulfillment not created."
     );
   }
 
-  const mutation = `mutation BridgeFulfillmentCreate($fulfillment: FulfillmentInput!) {
-    fulfillmentCreate(fulfillment: $fulfillment) {
-      fulfillment {
-        id
-        status
-        trackingInfo(first: 10) {
-          company
-          number
-          url
+  const fo = chooseFulfillmentOrder(
+    order.fulfillmentOrders?.nodes || []
+  );
+
+  if (!fo) {
+    throw new Error(
+      "No open Shopify fulfillment order found. " +
+      "The order may already be fulfilled, cancelled, " +
+      "on hold, or assigned differently."
+    );
+  }
+
+  const mutation = `
+    mutation BridgeFulfillmentCreate(
+      $fulfillment: FulfillmentInput!
+    ) {
+      fulfillmentCreate(
+        fulfillment: $fulfillment
+      ) {
+        fulfillment {
+          id
+          status
+          trackingInfo(first: 10) {
+            company
+            number
+            url
+          }
+        }
+
+        userErrors {
+          field
+          message
         }
       }
-      userErrors {
-        field
-        message
-      }
     }
-  }`;
+  `;
+
+  const trackingInfo = {
+    company: "Trackon",
+    number: String(awb),
+  };
+
+  const trackingUrl = buildTrackingUrl(awb);
+
+  if (trackingUrl) {
+    trackingInfo.url = trackingUrl;
+  }
 
   const variables = {
     fulfillment: {
-      lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id }],
-      notifyCustomer: config.shopify.notifyCustomer,
-      trackingInfo: {
-        company: "Trackon",
-        number: String(awb),
-        url: "https://trackon.in/courier-tracking",
-      },
+      lineItemsByFulfillmentOrder: [
+        {
+          fulfillmentOrderId: fo.id,
+        },
+      ],
+
+      notifyCustomer:
+        config.shopify.notifyCustomer,
+
+      trackingInfo,
     },
   };
 
-  const data = await shopifyGraphql(mutation, variables, shop);
+  const data = await shopifyGraphql(
+    mutation,
+    variables,
+    shop
+  );
+
   const result = data.fulfillmentCreate;
 
   if (result.userErrors?.length) {
     throw new Error(
-      `Shopify fulfillment error: ${JSON.stringify(result.userErrors)}`,
+      `Shopify fulfillment error: ${JSON.stringify(
+        result.userErrors
+      )}`
     );
   }
 
   if (!result.fulfillment?.id) {
-    throw new Error("Shopify fulfillment was not created.");
+    throw new Error(
+      "Shopify fulfillment was not created."
+    );
   }
 
   return result.fulfillment;
+}
+
+export async function createShopifyFulfillmentEvent({
+  fulfillmentId,
+  status,
+  message,
+  happenedAt,
+  shop = config.shopify.shop,
+}) {
+  if (!fulfillmentId) {
+    throw new Error(
+      "Shopify fulfillment ID is required to create a fulfillment event."
+    );
+  }
+
+  if (!status) {
+    throw new Error(
+      "Shopify fulfillment event status is required."
+    );
+  }
+
+  const mutation = `
+    mutation BridgeFulfillmentEventCreate(
+      $fulfillmentEvent: FulfillmentEventInput!
+    ) {
+      fulfillmentEventCreate(
+        fulfillmentEvent: $fulfillmentEvent
+      ) {
+        fulfillmentEvent {
+          id
+          status
+          message
+          happenedAt
+        }
+
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const fulfillmentEvent = {
+    fulfillmentId,
+    status,
+  };
+
+  if (message) {
+    fulfillmentEvent.message = message;
+  }
+
+  if (happenedAt) {
+    fulfillmentEvent.happenedAt = happenedAt;
+  }
+
+  const data = await shopifyGraphql(
+    mutation,
+    {
+      fulfillmentEvent,
+    },
+    shop
+  );
+
+  const result = data.fulfillmentEventCreate;
+
+  if (result.userErrors?.length) {
+    throw new Error(
+      `Shopify fulfillment event error: ${JSON.stringify(
+        result.userErrors
+      )}`
+    );
+  }
+
+  if (!result.fulfillmentEvent?.id) {
+    throw new Error(
+      "Shopify fulfillment event was not created."
+    );
+  }
+
+  return result.fulfillmentEvent;
 }
 
 export async function syncTrackingMetafields({
@@ -159,14 +310,31 @@ export async function syncTrackingMetafields({
   awb,
   shop = config.shopify.shop,
 }) {
-  if (!config.shopify.syncTrackingMetafields) return null;
+  if (!config.shopify.syncTrackingMetafields) {
+    return null;
+  }
 
-  const mutation = `mutation BridgeTrackingMetafields($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      metafields { namespace key value }
-      userErrors { field message code }
+  const mutation = `
+    mutation BridgeTrackingMetafields(
+      $metafields: [MetafieldsSetInput!]!
+    ) {
+      metafieldsSet(
+        metafields: $metafields
+      ) {
+        metafields {
+          namespace
+          key
+          value
+        }
+
+        userErrors {
+          field
+          message
+          code
+        }
+      }
     }
-  }`;
+  `;
 
   const entries = [
     ["current_status", status || ""],
@@ -186,47 +354,80 @@ export async function syncTrackingMetafields({
     })),
   };
 
-  const data = await shopifyGraphql(mutation, variables, shop);
-  const errors = data.metafieldsSet?.userErrors || [];
+  const data = await shopifyGraphql(
+    mutation,
+    variables,
+    shop
+  );
+
+  const errors =
+    data.metafieldsSet?.userErrors || [];
 
   if (errors.length) {
-    throw new Error(`Shopify metafield error: ${JSON.stringify(errors)}`);
+    throw new Error(
+      `Shopify metafield error: ${JSON.stringify(errors)}`
+    );
   }
 
   return data.metafieldsSet?.metafields || [];
 }
 
-export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
+export async function registerWebhook(
+  topic,
+  uri,
+  shop = config.shopify.shop
+) {
   const existingData = await shopifyGraphql(
     `query BridgeWebhookList {
       webhookSubscriptions(first: 100) {
-        nodes { id topic uri }
+        nodes {
+          id
+          topic
+          uri
+        }
       }
     }`,
     {},
-    shop,
+    shop
   );
 
-  const existing = (existingData.webhookSubscriptions?.nodes || []).find(
-    (w) => w.topic === topic && w.uri === uri,
+  const existing = (
+    existingData.webhookSubscriptions?.nodes || []
+  ).find(
+    (w) =>
+      w.topic === topic &&
+      w.uri === uri
   );
 
   if (existing) {
-    return { ...existing, alreadyExisted: true };
+    return {
+      ...existing,
+      alreadyExisted: true,
+    };
   }
 
-  const mutation = `mutation BridgeWebhookCreate(
-    $topic: WebhookSubscriptionTopic!,
-    $webhookSubscription: WebhookSubscriptionInput!
-  ) {
-    webhookSubscriptionCreate(
-      topic: $topic,
-      webhookSubscription: $webhookSubscription
+  const mutation = `
+    mutation BridgeWebhookCreate(
+      $topic: WebhookSubscriptionTopic!,
+      $webhookSubscription: WebhookSubscriptionInput!
     ) {
-      webhookSubscription { id topic uri }
-      userErrors { field message }
+      webhookSubscriptionCreate(
+        topic: $topic,
+        webhookSubscription: $webhookSubscription
+      ) {
+        webhookSubscription {
+          id
+          topic
+          uri
+        }
+
+        userErrors {
+          field
+          message
+        }
+      }
     }
-  }`;
+  `;
 
   const data = await shopifyGraphql(
     mutation,
@@ -237,14 +438,17 @@ export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
         format: "JSON",
       },
     },
-    shop,
+    shop
   );
 
-  const result = data.webhookSubscriptionCreate;
+  const result =
+    data.webhookSubscriptionCreate;
 
   if (result.userErrors?.length) {
     throw new Error(
-      `Webhook create error: ${JSON.stringify(result.userErrors)}`,
+      `Webhook create error: ${JSON.stringify(
+        result.userErrors
+      )}`
     );
   }
 
@@ -254,18 +458,34 @@ export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
   };
 }
 
-export async function registerDefaultWebhooks(shop = config.shopify.shop) {
+export async function registerDefaultWebhooks(
+  shop = config.shopify.shop
+) {
   if (!config.publicBaseUrl) {
-    throw new Error("PUBLIC_BASE_URL is required before registering webhooks.");
+    throw new Error(
+      "PUBLIC_BASE_URL is required before registering webhooks."
+    );
   }
 
-  const uri = `${config.publicBaseUrl}/webhooks/orders`;
-  const topics = ["ORDERS_CREATE", "ORDERS_PAID", "ORDERS_CANCELLED"];
+  const uri =
+    `${config.publicBaseUrl}/webhooks/orders`;
+
+  const topics = [
+    "ORDERS_CREATE",
+    "ORDERS_PAID",
+    "ORDERS_CANCELLED",
+  ];
 
   const results = [];
 
   for (const topic of topics) {
-    results.push(await registerWebhook(topic, uri, shop));
+    results.push(
+      await registerWebhook(
+        topic,
+        uri,
+        shop
+      )
+    );
   }
 
   return results;
