@@ -52,7 +52,7 @@ export async function getShopifyAccessToken(shop = config.shopify.shop) {
     return cachedClientToken.accessToken;
   }
 
-  const stored = getOauthToken(shop);
+  const stored = await getOauthToken(shop);
   if (!stored?.accessToken) {
     throw new Error(
       `No OAuth token saved for ${shop}. Open /auth/install?shop=${encodeURIComponent(shop)} first.`

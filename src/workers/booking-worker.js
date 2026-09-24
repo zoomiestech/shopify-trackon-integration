@@ -12,8 +12,7 @@ import { createShopifyFulfillment } from "../services/shopify.js";
 let running = false;
 
 function topicToTrigger(topic) {
-  const normalized = String(topic || "").toLowerCase().replace("/", "_");
-  return normalized;
+  return String(topic || "").toLowerCase().replace("/", "_");
 }
 
 async function processOrderBooking(job) {
@@ -33,9 +32,8 @@ async function processOrderBooking(job) {
     return;
   }
 
-  let shipment = getShipment(orderId);
+  let shipment = await getShipment(orderId);
 
-  // Save enough payload for a manual retry without waiting for another webhook.
   await upsertShipment(orderId, {
     orderGid,
     orderName: order.name,
@@ -44,9 +42,9 @@ async function processOrderBooking(job) {
     lastOrderPayload: order,
   });
 
-  shipment = getShipment(orderId);
+  shipment = await getShipment(orderId);
 
-  // Idempotency: never create a second Trackon AWB if one is already saved.
+  // Idempotency: once an AWB exists in MongoDB, retries never create a new one.
   if (!shipment?.awb) {
     const booking = await createTrackonBooking(order);
 
@@ -60,10 +58,10 @@ async function processOrderBooking(job) {
     });
   }
 
-  shipment = getShipment(orderId);
+  shipment = await getShipment(orderId);
 
-  // If Trackon succeeded but Shopify fulfillment failed, retries start here,
-  // reusing the existing AWB rather than creating a duplicate shipment.
+  // If Trackon succeeded but Shopify failed afterward, retry from here using
+  // the already persisted AWB.
   if (!shipment?.shopifyFulfillmentId) {
     const fulfillment = await createShopifyFulfillment({
       orderGid,
@@ -76,6 +74,7 @@ async function processOrderBooking(job) {
       shopifyFulfillmentStatus: fulfillment.status,
       shopifyFulfillmentCreatedAt: new Date().toISOString(),
       shopifyFulfillmentError: null,
+      lastError: null,
     });
   }
 }
@@ -83,6 +82,7 @@ async function processOrderBooking(job) {
 async function processCancellation(job) {
   const order = job.payload;
   const orderId = String(order.id);
+
   await upsertShipment(orderId, {
     orderGid:
       order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`,
@@ -104,6 +104,7 @@ async function processJob(job) {
   }
 
   const expected = config.shopify.bookingTrigger;
+
   if (topicToTrigger(topic) !== expected) {
     return;
   }
@@ -113,20 +114,31 @@ async function processJob(job) {
 
 export async function runBookingWorkerOnce() {
   if (running) return;
+
   running = true;
+
   try {
     const job = await leaseNextJob();
     if (!job) return;
 
     try {
       await processJob(job);
-      await completeJob(job.id);
-      console.log(`[job ${job.id}] completed ${job.topic}`);
+      await completeJob(job.jobId || job.id);
+      console.log(`[job ${job.jobId || job.id}] completed ${job.topic}`);
     } catch (error) {
-      console.error(`[job ${job.id}] failed`, error?.response?.data || error);
-      await failJob(job.id, error, Math.min(60 * (job.attempts || 1), 300));
+      console.error(
+        `[job ${job.jobId || job.id}] failed`,
+        error?.response?.data || error
+      );
+
+      await failJob(
+        job.jobId || job.id,
+        error,
+        Math.min(60 * (job.attempts || 1), 300)
+      );
 
       const orderId = job.payload?.id;
+
       if (orderId) {
         await upsertShipment(String(orderId), {
           lastError: String(

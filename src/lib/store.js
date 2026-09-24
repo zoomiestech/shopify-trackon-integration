@@ -1,235 +1,216 @@
-import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
-import { config } from "../config.js";
+import { Job, Shipment, OauthState, OauthToken } from "./models.js";
 
-const filePath = path.resolve(config.dataFile);
-let lock = Promise.resolve();
-
-function initialStore() {
-  return {
-    version: 1,
-    webhookEvents: {},
-    jobs: [],
-    shipments: {},
-    oauthStates: {},
-    oauthTokens: {},
-  };
+function plain(doc) {
+  if (!doc) return null;
+  const obj = typeof doc.toObject === "function" ? doc.toObject() : doc;
+  if (obj._id) obj._id = String(obj._id);
+  delete obj.__v;
+  return obj;
 }
 
-function ensureStore() {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(initialStore(), null, 2));
-  }
-}
-
-function readUnsafe() {
-  ensureStore();
+export async function recordWebhookAndEnqueue({
+  eventId,
+  topic,
+  shop,
+  payload,
+}) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return { ...initialStore(), ...parsed };
-  } catch {
-    const broken = `${filePath}.broken-${Date.now()}`;
-    try { fs.copyFileSync(filePath, broken); } catch {}
-    const fresh = initialStore();
-    fs.writeFileSync(filePath, JSON.stringify(fresh, null, 2));
-    return fresh;
-  }
-}
-
-function writeUnsafe(data) {
-  const temp = `${filePath}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(data, null, 2));
-  fs.renameSync(temp, filePath);
-}
-
-async function mutate(fn) {
-  const current = lock;
-  let release;
-  lock = new Promise((resolve) => (release = resolve));
-  await current;
-  try {
-    const db = readUnsafe();
-    const result = await fn(db);
-    writeUnsafe(db);
-    return result;
-  } finally {
-    release();
-  }
-}
-
-export async function recordWebhookAndEnqueue({ eventId, topic, shop, payload }) {
-  return mutate((db) => {
-    if (db.webhookEvents[eventId]) return { duplicate: true };
-
-    db.webhookEvents[eventId] = {
+    await Job.create({
+      jobId: crypto.randomUUID(),
       eventId,
-      topic,
-      shop,
-      receivedAt: new Date().toISOString(),
-    };
-
-    db.jobs.push({
-      id: crypto.randomUUID(),
       type: "shopify_webhook",
       topic,
       shop,
       payload,
       status: "pending",
       attempts: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      nextAttemptAt: new Date().toISOString(),
+      nextAttemptAt: new Date(),
       error: null,
     });
 
-    // Keep webhook event history bounded.
-    const ids = Object.keys(db.webhookEvents);
-    if (ids.length > 5000) {
-      ids.slice(0, ids.length - 5000).forEach((id) => delete db.webhookEvents[id]);
-    }
-
     return { duplicate: false };
-  });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return { duplicate: true };
+    }
+    throw error;
+  }
 }
 
 export async function enqueueJob(job) {
-  return mutate((db) => {
-    const row = {
-      id: crypto.randomUUID(),
-      status: "pending",
-      attempts: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      nextAttemptAt: new Date().toISOString(),
-      error: null,
-      ...job,
-    };
-    db.jobs.push(row);
-    return row;
+  const row = await Job.create({
+    jobId: crypto.randomUUID(),
+    status: "pending",
+    attempts: 0,
+    nextAttemptAt: new Date(),
+    error: null,
+    ...job,
   });
+
+  return plain(row);
 }
 
 export async function leaseNextJob() {
-  return mutate((db) => {
-    const now = Date.now();
-    const job = db.jobs.find(
-      (j) =>
-        j.status === "pending" &&
-        (!j.nextAttemptAt || new Date(j.nextAttemptAt).getTime() <= now)
-    );
-    if (!job) return null;
-    job.status = "processing";
-    job.attempts = (job.attempts || 0) + 1;
-    job.updatedAt = new Date().toISOString();
-    return structuredClone(job);
-  });
+  const now = new Date();
+
+  const job = await Job.findOneAndUpdate(
+    {
+      status: "pending",
+      $or: [
+        { nextAttemptAt: { $exists: false } },
+        { nextAttemptAt: null },
+        { nextAttemptAt: { $lte: now } },
+      ],
+    },
+    {
+      $set: {
+        status: "processing",
+      },
+      $inc: {
+        attempts: 1,
+      },
+    },
+    {
+      sort: { createdAt: 1 },
+      new: true,
+    }
+  );
+
+  return plain(job);
 }
 
 export async function completeJob(id) {
-  return mutate((db) => {
-    const job = db.jobs.find((j) => j.id === id);
-    if (!job) return false;
-    job.status = "done";
-    job.error = null;
-    job.updatedAt = new Date().toISOString();
-
-    // Bound completed jobs.
-    const completed = db.jobs.filter((j) => j.status === "done");
-    if (completed.length > 1000) {
-      const remove = new Set(completed.slice(0, completed.length - 1000).map((j) => j.id));
-      db.jobs = db.jobs.filter((j) => !remove.has(j.id));
+  const result = await Job.updateOne(
+    { jobId: id },
+    {
+      $set: {
+        status: "done",
+        error: null,
+      },
     }
-    return true;
-  });
+  );
+
+  return result.matchedCount > 0;
 }
 
 export async function failJob(id, error, retryDelaySeconds = 60) {
-  return mutate((db) => {
-    const job = db.jobs.find((j) => j.id === id);
-    if (!job) return false;
+  const job = await Job.findOne({ jobId: id });
+  if (!job) return false;
 
-    const maxAttempts = 5;
-    job.error = String(error?.message || error || "Unknown job error");
-    job.updatedAt = new Date().toISOString();
+  const maxAttempts = 5;
+  job.error = String(error?.message || error || "Unknown job error");
 
-    if ((job.attempts || 0) >= maxAttempts) {
-      job.status = "failed";
-    } else {
-      job.status = "pending";
-      job.nextAttemptAt = new Date(Date.now() + retryDelaySeconds * 1000).toISOString();
-    }
-    return true;
-  });
+  if ((job.attempts || 0) >= maxAttempts) {
+    job.status = "failed";
+  } else {
+    job.status = "pending";
+    job.nextAttemptAt = new Date(Date.now() + retryDelaySeconds * 1000);
+  }
+
+  await job.save();
+  return true;
 }
 
-export function getShipment(orderId) {
-  const db = readUnsafe();
-  return db.shipments[String(orderId)] || null;
+export async function getShipment(orderId) {
+  return plain(
+    await Shipment.findOne({ orderId: String(orderId) }).lean()
+  );
 }
 
 export async function upsertShipment(orderId, patch) {
-  return mutate((db) => {
-    const key = String(orderId);
-    const old = db.shipments[key] || {
-      orderId: key,
-      createdAt: new Date().toISOString(),
-    };
-    db.shipments[key] = {
-      ...old,
-      ...patch,
-      updatedAt: new Date().toISOString(),
-    };
-    return structuredClone(db.shipments[key]);
+  const key = String(orderId);
+
+  const doc = await Shipment.findOneAndUpdate(
+    { orderId: key },
+    {
+      $set: {
+        ...patch,
+        orderId: key,
+      },
+      $setOnInsert: {
+        orderId: key,
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  ).lean();
+
+  return plain(doc);
+}
+
+export async function listShipments() {
+  const docs = await Shipment.find({})
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  return docs.map(plain);
+}
+
+export async function listJobs(limit = 200) {
+  const docs = await Job.find({})
+    .sort({ updatedAt: -1 })
+    .limit(limit)
+    .lean();
+
+  return docs.map((doc) => {
+    const out = plain(doc);
+    // Preserve the old API field name used by the server/UI.
+    out.id = out.jobId;
+    return out;
   });
-}
-
-export function listShipments() {
-  const db = readUnsafe();
-  return Object.values(db.shipments).sort((a, b) =>
-    String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))
-  );
-}
-
-export function listJobs() {
-  const db = readUnsafe();
-  return [...db.jobs].sort((a, b) =>
-    String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))
-  );
 }
 
 export async function saveOauthState(state, shop) {
-  return mutate((db) => {
-    db.oauthStates[state] = {
-      shop,
-      createdAt: new Date().toISOString(),
-    };
-  });
+  await OauthState.findOneAndUpdate(
+    { state },
+    {
+      $set: {
+        state,
+        shop,
+        createdAt: new Date(),
+      },
+    },
+    { upsert: true, new: true }
+  );
 }
 
 export async function consumeOauthState(state, shop) {
-  return mutate((db) => {
-    const found = db.oauthStates[state];
-    if (!found) return false;
-    delete db.oauthStates[state];
+  const found = await OauthState.findOneAndDelete({ state }).lean();
+  if (!found) return false;
 
-    const ageMs = Date.now() - new Date(found.createdAt).getTime();
-    return found.shop === shop && ageMs < 10 * 60 * 1000;
-  });
+  const ageMs = Date.now() - new Date(found.createdAt).getTime();
+  return found.shop === shop && ageMs < 10 * 60 * 1000;
 }
 
 export async function saveOauthToken(shop, tokenData) {
-  return mutate((db) => {
-    db.oauthTokens[shop] = {
-      ...tokenData,
-      updatedAt: new Date().toISOString(),
-    };
-  });
+  await OauthToken.findOneAndUpdate(
+    { shop },
+    {
+      $set: {
+        shop,
+        ...tokenData,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+    }
+  );
 }
 
-export function getOauthToken(shop) {
-  const db = readUnsafe();
-  return db.oauthTokens[shop] || null;
+export async function getOauthToken(shop) {
+  return plain(await OauthToken.findOne({ shop }).lean());
+}
+
+export async function databaseCounts() {
+  const [shipments, jobs] = await Promise.all([
+    Shipment.countDocuments(),
+    Job.countDocuments(),
+  ]);
+
+  return { shipments, jobs };
 }

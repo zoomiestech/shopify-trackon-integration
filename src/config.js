@@ -23,7 +23,11 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, ""),
   adminApiKey: process.env.ADMIN_API_KEY || "",
-  dataFile: process.env.DATA_FILE || "./data/store.json",
+
+  mongodb: {
+    uri: process.env.MONGODB_URI || "",
+    dbName: process.env.MONGODB_DB || "shopify_trackon",
+  },
 
   shopify: {
     apiVersion: process.env.SHOPIFY_API_VERSION || "2026-07",
@@ -75,19 +79,27 @@ export const config = {
 
 export function validateBaseConfig() {
   const errors = [];
+
+  if (!config.mongodb.uri) errors.push("MONGODB_URI is missing");
+
   if (!config.shopify.clientId) errors.push("SHOPIFY_CLIENT_ID is missing");
   if (!config.shopify.clientSecret) errors.push("SHOPIFY_CLIENT_SECRET is missing");
+
   if (!config.shopify.shop && config.shopify.authMode === "client_credentials") {
     errors.push("SHOPIFY_SHOP is missing");
   }
+
   if (!config.adminApiKey || config.adminApiKey === "change-this-to-a-long-random-secret") {
     errors.push("ADMIN_API_KEY should be set to a strong secret");
   }
+
   if (!["client_credentials", "oauth"].includes(config.shopify.authMode)) {
     errors.push("SHOPIFY_AUTH_MODE must be client_credentials or oauth");
   }
+
   if (!["orders_create", "orders_paid"].includes(config.shopify.bookingTrigger)) {
     errors.push("BOOKING_TRIGGER must be orders_create or orders_paid");
   }
+
   return errors;
 }

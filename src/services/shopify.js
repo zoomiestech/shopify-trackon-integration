@@ -2,7 +2,11 @@ import axios from "axios";
 import { config } from "../config.js";
 import { getShopifyAccessToken } from "./shopify-auth.js";
 
-export async function shopifyGraphql(query, variables = {}, shop = config.shopify.shop) {
+export async function shopifyGraphql(
+  query,
+  variables = {},
+  shop = config.shopify.shop
+) {
   if (!shop) throw new Error("Shopify shop is not configured.");
 
   const token = await getShopifyAccessToken(shop);
@@ -23,6 +27,7 @@ export async function shopifyGraphql(query, variables = {}, shop = config.shopif
   if (data.errors?.length) {
     throw new Error(`Shopify GraphQL error: ${JSON.stringify(data.errors)}`);
   }
+
   return data.data;
 }
 
@@ -39,6 +44,7 @@ export async function testShopifyConnection(shop = config.shopify.shop) {
     {},
     shop
   );
+
   return data.shop;
 }
 
@@ -73,7 +79,11 @@ export async function getFulfillmentOrders(
 }
 
 function chooseFulfillmentOrder(nodes = []) {
-  return nodes.find((fo) => !["CLOSED", "CANCELLED"].includes(fo.status));
+  return nodes.find(
+    (fo) =>
+      !["CLOSED", "CANCELLED"].includes(fo.status) &&
+      fo.requestStatus !== "SUBMITTED"
+  );
 }
 
 export async function createShopifyFulfillment({
@@ -82,11 +92,13 @@ export async function createShopifyFulfillment({
   shop = config.shopify.shop,
 }) {
   const order = await getFulfillmentOrders(orderGid, shop);
+
   if (order.cancelledAt) {
     throw new Error("Shopify order is cancelled; fulfillment not created.");
   }
 
   const fo = chooseFulfillmentOrder(order.fulfillmentOrders?.nodes || []);
+
   if (!fo) {
     throw new Error(
       "No open Shopify fulfillment order found. The order may already be fulfilled, cancelled, on hold, or assigned differently."
@@ -128,11 +140,15 @@ export async function createShopifyFulfillment({
   const result = data.fulfillmentCreate;
 
   if (result.userErrors?.length) {
-    throw new Error(`Shopify fulfillment error: ${JSON.stringify(result.userErrors)}`);
+    throw new Error(
+      `Shopify fulfillment error: ${JSON.stringify(result.userErrors)}`
+    );
   }
+
   if (!result.fulfillment?.id) {
     throw new Error("Shopify fulfillment was not created.");
   }
+
   return result.fulfillment;
 }
 
@@ -173,13 +189,21 @@ export async function syncTrackingMetafields({
 
   const data = await shopifyGraphql(mutation, variables, shop);
   const errors = data.metafieldsSet?.userErrors || [];
+
   if (errors.length) {
-    throw new Error(`Shopify metafield error: ${JSON.stringify(errors)}`);
+    throw new Error(
+      `Shopify metafield error: ${JSON.stringify(errors)}`
+    );
   }
+
   return data.metafieldsSet?.metafields || [];
 }
 
-export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
+export async function registerWebhook(
+  topic,
+  uri,
+  shop = config.shopify.shop
+) {
   const existingData = await shopifyGraphql(
     `query BridgeWebhookList {
       webhookSubscriptions(first: 100) {
@@ -193,7 +217,10 @@ export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
   const existing = (existingData.webhookSubscriptions?.nodes || []).find(
     (w) => w.topic === topic && w.uri === uri
   );
-  if (existing) return { ...existing, alreadyExisted: true };
+
+  if (existing) {
+    return { ...existing, alreadyExisted: true };
+  }
 
   const mutation = `mutation BridgeWebhookCreate(
     $topic: WebhookSubscriptionTopic!,
@@ -221,23 +248,42 @@ export async function registerWebhook(topic, uri, shop = config.shopify.shop) {
   );
 
   const result = data.webhookSubscriptionCreate;
+
   if (result.userErrors?.length) {
-    throw new Error(`Webhook create error: ${JSON.stringify(result.userErrors)}`);
+    throw new Error(
+      `Webhook create error: ${JSON.stringify(result.userErrors)}`
+    );
   }
-  return { ...result.webhookSubscription, alreadyExisted: false };
+
+  return {
+    ...result.webhookSubscription,
+    alreadyExisted: false,
+  };
 }
 
-export async function registerDefaultWebhooks(shop = config.shopify.shop) {
+export async function registerDefaultWebhooks(
+  shop = config.shopify.shop
+) {
   if (!config.publicBaseUrl) {
-    throw new Error("PUBLIC_BASE_URL is required before registering webhooks.");
+    throw new Error(
+      "PUBLIC_BASE_URL is required before registering webhooks."
+    );
   }
 
   const uri = `${config.publicBaseUrl}/webhooks/orders`;
-  const topics = ["ORDERS_CREATE", "ORDERS_PAID", "ORDERS_CANCELLED"];
+  const topics = [
+    "ORDERS_CREATE",
+    "ORDERS_PAID",
+    "ORDERS_CANCELLED",
+  ];
+
   const results = [];
 
   for (const topic of topics) {
-    results.push(await registerWebhook(topic, uri, shop));
+    results.push(
+      await registerWebhook(topic, uri, shop)
+    );
   }
+
   return results;
 }
