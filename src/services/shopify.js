@@ -42,7 +42,10 @@ export async function testShopifyConnection(shop = config.shopify.shop) {
   return data.shop;
 }
 
-export async function getFulfillmentOrders(orderGid, shop = config.shopify.shop) {
+export async function getFulfillmentOrders(
+  orderGid,
+  shop = config.shopify.shop
+) {
   const data = await shopifyGraphql(
     `query BridgeFulfillmentOrders($id: ID!) {
       order(id: $id) {
@@ -54,10 +57,6 @@ export async function getFulfillmentOrders(orderGid, shop = config.shopify.shop)
             id
             status
             requestStatus
-            assignedLocation {
-              name
-              location { id }
-            }
           }
         }
       }
@@ -66,7 +65,10 @@ export async function getFulfillmentOrders(orderGid, shop = config.shopify.shop)
     shop
   );
 
-  if (!data.order) throw new Error(`Shopify order not found: ${orderGid}`);
+  if (!data.order) {
+    throw new Error(`Shopify order not found: ${orderGid}`);
+  }
+
   return data.order;
 }
 
