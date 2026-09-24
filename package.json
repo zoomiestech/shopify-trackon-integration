@@ -1,0 +1,23 @@
+{
+  "name": "shopify-trackon-integration",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shopify to Trackon courier booking, AWB fulfillment and tracking sync integration",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "register-webhooks": "node scripts/register-webhooks.js",
+    "test:shopify": "node scripts/test-shopify.js",
+    "test:tracking": "node scripts/test-trackon-tracking.js",
+    "test:mock-booking": "node scripts/test-mock-booking.js"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0"
+  }
+}
