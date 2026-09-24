@@ -11,11 +11,26 @@ import {
 } from "../services/trackon.js";
 
 import {
-  syncTrackingMetafields,
+  createShopifyFulfillment,
   createShopifyFulfillmentEvent,
+  syncTrackingMetafields,
 } from "../services/shopify.js";
 
 let running = false;
+
+/**
+ * Trackon status mapping used in this integration.
+ *
+ * PRSS = Pickup Closure - Successful / Pickup Successful
+ *
+ * DRSG / DRSF = Out for Delivery
+ *
+ * DDUB / DDUF / DDUA = Delivered
+ */
+const PICKUP_SUCCESS_CODES =
+  new Set([
+    "PRSS",
+  ]);
 
 const OUT_FOR_DELIVERY_CODES =
   new Set([
@@ -30,12 +45,8 @@ const DELIVERED_CODES =
     "DDUA",
   ]);
 
-const TERMINAL_CODES =
+const RTO_TERMINAL_CODES =
   new Set([
-    ...DELIVERED_CODES,
-
-    // RTO delivered. Terminal for polling, but this does NOT
-    // send the forward-order Shopify "Delivered" event.
     "RHOD",
   ]);
 
@@ -45,47 +56,68 @@ function normalizeCode(code) {
     .toUpperCase();
 }
 
-function isTerminal(shipment) {
-  const code = normalizeCode(
-    shipment.trackingCode
-  );
+function trackingRows(tracking) {
+  const rows = [];
 
-  if (TERMINAL_CODES.has(code)) {
-    return true;
+  if (tracking) {
+    rows.push({
+      CURRENT_CITY:
+        tracking.city || "",
+
+      CURRENT_STATUS:
+        tracking.status || "",
+
+      EVENTDATE:
+        tracking.eventDate || "",
+
+      EVENTTIME:
+        tracking.eventTime || "",
+
+      TRACKING_CODE:
+        tracking.trackingCode || "",
+    });
   }
 
-  const status = String(
-    shipment.trackingStatus || ""
-  ).toLowerCase();
+  if (
+    Array.isArray(
+      tracking?.details
+    )
+  ) {
+    rows.push(
+      ...tracking.details
+    );
+  }
 
-  return (
-    status.includes("delivered") &&
-    !status.includes("undelivered")
+  return rows;
+}
+
+function findTrackingRowByCodes(
+  tracking,
+  codes
+) {
+  return trackingRows(
+    tracking
+  ).find((row) =>
+    codes.has(
+      normalizeCode(
+        row?.TRACKING_CODE ||
+        row?.TrackingCode ||
+        row?.trackingCode
+      )
+    )
   );
 }
 
-function needsShopifyMilestoneEvent(
-  shipment
+function hasTrackingCode(
+  tracking,
+  codes
 ) {
-  const code = normalizeCode(
-    shipment.trackingCode
+  return Boolean(
+    findTrackingRowByCodes(
+      tracking,
+      codes
+    )
   );
-
-  if (
-    OUT_FOR_DELIVERY_CODES.has(code) &&
-    !shipment.shopifyOutForDeliverySentAt
-  ) {
-    return true;
-  }
-
-  if (
-    DELIVERED_CODES.has(code) &&
-    !shipment.shopifyDeliveredSentAt
-  ) {
-    return true;
-  }
-
-  return false;
 }
 
 function buildHappenedAt(
@@ -97,10 +129,15 @@ function buildHappenedAt(
   }
 
   const rawDate =
-    String(eventDate).trim();
+    String(
+      eventDate
+    ).trim();
 
   const rawTime =
-    String(eventTime || "00:00:00").trim();
+    String(
+      eventTime ||
+      "00:00:00"
+    ).trim();
 
   const match =
     rawDate.match(
@@ -108,8 +145,12 @@ function buildHappenedAt(
     );
 
   if (match) {
-    const [, dd, mm, yyyy] =
-      match;
+    const [
+      ,
+      dd,
+      mm,
+      yyyy,
+    ] = match;
 
     const iso =
       `${yyyy}-` +
@@ -118,7 +159,8 @@ function buildHappenedAt(
       `${rawTime || "00:00:00"}` +
       "+05:30";
 
-    const date = new Date(iso);
+    const date =
+      new Date(iso);
 
     if (
       !Number.isNaN(
@@ -145,37 +187,370 @@ function buildHappenedAt(
   return undefined;
 }
 
-function getShopifyMilestone(
-  tracking
-) {
-  const code = normalizeCode(
-    tracking.trackingCode
+function rowDateTime(row) {
+  if (!row) {
+    return undefined;
+  }
+
+  return buildHappenedAt(
+    row.EVENTDATE ||
+    row.EventDate ||
+    row.eventDate,
+
+    row.EVENTTIME ||
+    row.EventTime ||
+    row.eventTime
   );
+}
+
+function isRtoTerminal(shipment) {
+  return RTO_TERMINAL_CODES.has(
+    normalizeCode(
+      shipment.trackingCode
+    )
+  );
+}
+
+function isForwardDelivered(
+  shipment
+) {
+  return DELIVERED_CODES.has(
+    normalizeCode(
+      shipment.trackingCode
+    )
+  );
+}
+
+/**
+ * We keep polling until the forward shipment has reached Delivered AND
+ * the Shopify Delivered event has been successfully created.
+ *
+ * This prevents a transient Shopify API failure from permanently losing
+ * the customer notification.
+ */
+function shouldPollShipment(
+  shipment
+) {
+  if (
+    !shipment.awb ||
+    shipment.shopifyCancelled
+  ) {
+    return false;
+  }
 
   if (
-    OUT_FOR_DELIVERY_CODES.has(code)
+    isRtoTerminal(shipment)
   ) {
+    return false;
+  }
+
+  if (
+    isForwardDelivered(
+      shipment
+    ) &&
+    shipment.shopifyDeliveredSentAt
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Creates the Shopify fulfillment ONLY after Trackon confirms pickup success.
+ *
+ * This is the dispatch point for the Shopify customer journey.
+ */
+async function ensureFulfillmentAfterPickup(
+  shipment,
+  tracking
+) {
+  if (
+    shipment.shopifyFulfillmentId
+  ) {
+    return shipment;
+  }
+
+  const pickupRow =
+    findTrackingRowByCodes(
+      tracking,
+      PICKUP_SUCCESS_CODES
+    );
+
+  if (!pickupRow) {
+    return shipment;
+  }
+
+  if (
+    !shipment.orderGid
+  ) {
+    throw new Error(
+      `Cannot create Shopify fulfillment for order ${shipment.orderId}: orderGid is missing.`
+    );
+  }
+
+  const fulfillment =
+    await createShopifyFulfillment({
+      orderGid:
+        shipment.orderGid,
+
+      awb:
+        shipment.awb,
+
+      shop:
+        shipment.shop ||
+        config.shopify.shop,
+
+      // This is intentionally TRUE here.
+      // The customer receives the Shopify dispatch/shipping email
+      // only after Trackon PRSS confirms pickup success.
+      notifyCustomer:
+        true,
+    });
+
+  const now =
+    new Date().toISOString();
+
+  const pickupAt =
+    rowDateTime(
+      pickupRow
+    ) || now;
+
+  const patch = {
+    shopifyFulfillmentId:
+      fulfillment.id,
+
+    shopifyFulfillmentStatus:
+      fulfillment.status,
+
+    shopifyFulfillmentCreatedAt:
+      now,
+
+    pickupConfirmedAt:
+      pickupAt,
+
+    pickupTrackingCode:
+      normalizeCode(
+        pickupRow.TRACKING_CODE ||
+        pickupRow.TrackingCode ||
+        pickupRow.trackingCode
+      ),
+
+    dispatchState:
+      "DISPATCHED_AFTER_PICKUP",
+
+    dispatchNotificationRequestedAt:
+      now,
+
+    shopifyFulfillmentError:
+      null,
+
+    lastError:
+      null,
+  };
+
+  await upsertShipment(
+    shipment.orderId,
+    patch
+  );
+
+  console.log(
+    `[tracking] Pickup confirmed; Shopify fulfillment created for order ${shipment.orderId}`
+  );
+
+  return {
+    ...shipment,
+    ...patch,
+  };
+}
+
+async function createMilestoneEventOnce({
+  shipment,
+  tracking,
+  codes,
+  status,
+  message,
+  sentAtField,
+  eventIdField,
+}) {
+  if (
+    !shipment.shopifyFulfillmentId
+  ) {
+    return shipment;
+  }
+
+  if (
+    shipment[sentAtField]
+  ) {
+    return shipment;
+  }
+
+  const row =
+    findTrackingRowByCodes(
+      tracking,
+      codes
+    );
+
+  if (!row) {
+    return shipment;
+  }
+
+  try {
+    const event =
+      await createShopifyFulfillmentEvent({
+        fulfillmentId:
+          shipment.shopifyFulfillmentId,
+
+        status,
+
+        message:
+          typeof message ===
+          "function"
+            ? message(row)
+            : message,
+
+        happenedAt:
+          rowDateTime(row),
+
+        shop:
+          shipment.shop ||
+          config.shopify.shop,
+      });
+
+    const patch = {
+      [sentAtField]:
+        new Date().toISOString(),
+
+      [eventIdField]:
+        event.id,
+
+      shopifyFulfillmentEventError:
+        null,
+    };
+
+    await upsertShipment(
+      shipment.orderId,
+      patch
+    );
+
+    console.log(
+      `[tracking] Shopify ${status} event created for order ${shipment.orderId}`
+    );
+
     return {
+      ...shipment,
+      ...patch,
+    };
+  } catch (error) {
+    const errorMessage =
+      String(
+        error?.response?.data
+          ? JSON.stringify(
+              error.response.data
+            )
+          : error?.message ||
+            error
+      ).slice(
+        0,
+        5000
+      );
+
+    await upsertShipment(
+      shipment.orderId,
+      {
+        shopifyFulfillmentEventError:
+          errorMessage,
+
+        shopifyFulfillmentEventErrorAt:
+          new Date().toISOString(),
+      }
+    );
+
+    console.error(
+      `[tracking] Shopify ${status} event failed for order ${shipment.orderId}`,
+      error?.response?.data ||
+      error
+    );
+
+    // Keep the sentAt marker unset so the next poll retries.
+    return shipment;
+  }
+}
+
+async function syncShopifyMilestones(
+  shipment,
+  tracking
+) {
+  let current =
+    shipment;
+
+  /**
+   * First create the actual Shopify fulfillment only after PRSS.
+   *
+   * We inspect both the current summary AND lstDetails.
+   * This matters if polling sees a later status but the Trackon history
+   * still contains the earlier PRSS pickup-success scan.
+   */
+  current =
+    await ensureFulfillmentAfterPickup(
+      current,
+      tracking
+    );
+
+  if (
+    !current.shopifyFulfillmentId
+  ) {
+    return current;
+  }
+
+  /**
+   * If the worker was temporarily offline and Trackon is already at a
+   * later milestone, lstDetails allows us to backfill the missing
+   * Out for Delivery event before Delivered.
+   */
+  current =
+    await createMilestoneEventOnce({
+      shipment:
+        current,
+
+      tracking,
+
+      codes:
+        OUT_FOR_DELIVERY_CODES,
+
       status:
         "OUT_FOR_DELIVERY",
 
       message:
-        tracking.city
-          ? `Your shipment is out for delivery from ${tracking.city}.`
-          : "Your shipment is out for delivery.",
+        (row) => {
+          const city =
+            row.CURRENT_CITY ||
+            row.CurrentCity ||
+            row.currentCity ||
+            "";
+
+          return city
+            ? `Your shipment is out for delivery from ${city}.`
+            : "Your shipment is out for delivery.";
+        },
 
       sentAtField:
         "shopifyOutForDeliverySentAt",
 
       eventIdField:
         "shopifyOutForDeliveryEventId",
-    };
-  }
+    });
 
-  if (
-    DELIVERED_CODES.has(code)
-  ) {
-    return {
+  current =
+    await createMilestoneEventOnce({
+      shipment:
+        current,
+
+      tracking,
+
+      codes:
+        DELIVERED_CODES,
+
       status:
         "DELIVERED",
 
@@ -187,123 +562,34 @@ function getShopifyMilestone(
 
       eventIdField:
         "shopifyDeliveredEventId",
-    };
-  }
+    });
 
-  return null;
-}
-
-async function syncShopifyMilestoneEvent(
-  shipment,
-  tracking
-) {
-  const milestone =
-    getShopifyMilestone(
-      tracking
-    );
-
-  if (!milestone) {
-    return null;
-  }
-
-  if (!shipment.shopifyFulfillmentId) {
-    return null;
-  }
-
-  if (
-    shipment[milestone.sentAtField]
-  ) {
-    return null;
-  }
-
-  try {
-    const event =
-      await createShopifyFulfillmentEvent({
-        fulfillmentId:
-          shipment.shopifyFulfillmentId,
-
-        status:
-          milestone.status,
-
-        message:
-          milestone.message,
-
-        happenedAt:
-          buildHappenedAt(
-            tracking.eventDate,
-            tracking.eventTime
-          ),
-
-        shop:
-          shipment.shop ||
-          config.shopify.shop,
-      });
-
-    await upsertShipment(
-      shipment.orderId,
-      {
-        [milestone.sentAtField]:
-          new Date().toISOString(),
-
-        [milestone.eventIdField]:
-          event.id,
-
-        shopifyFulfillmentEventError:
-          null,
-      }
-    );
-
-    console.log(
-      `[tracking] Shopify ${milestone.status} event created for order ${shipment.orderId}`
-    );
-
-    return event;
-  } catch (error) {
-    const message =
-      String(
-        error?.response?.data
-          ? JSON.stringify(
-              error.response.data
-            )
-          : error?.message || error
-      ).slice(0, 5000);
-
-    await upsertShipment(
-      shipment.orderId,
-      {
-        shopifyFulfillmentEventError:
-          message,
-
-        shopifyFulfillmentEventErrorAt:
-          new Date().toISOString(),
-      }
-    );
-
-    console.error(
-      `[tracking] Shopify fulfillment event failed for order ${shipment.orderId}`,
-      error?.response?.data || error
-    );
-
-    return null;
-  }
+  return current;
 }
 
 function sleep(ms) {
   return new Promise(
     (resolve) =>
-      setTimeout(resolve, ms)
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
 
 export async function runTrackingSyncOnce() {
   if (running) {
     return {
-      skipped: true,
-      reason: "already running",
+      skipped:
+        true,
+
+      reason:
+        "already running",
     };
   }
 
   running = true;
+
   const results = [];
 
   try {
@@ -312,18 +598,12 @@ export async function runTrackingSyncOnce() {
 
     const shipments =
       allShipments.filter(
-        (shipment) =>
-          shipment.awb &&
-          !shipment.shopifyCancelled &&
-          (
-            !isTerminal(shipment) ||
-            needsShopifyMilestoneEvent(
-              shipment
-            )
-          )
+        shouldPollShipment
       );
 
-    for (const shipment of shipments) {
+    for (
+      const shipment of shipments
+    ) {
       try {
         const raw =
           await trackTrackonAwb(
@@ -335,54 +615,63 @@ export async function runTrackingSyncOnce() {
             raw
           );
 
+        const trackingPatch = {
+          trackingStatus:
+            normalized.status,
+
+          trackingCode:
+            normalized.trackingCode,
+
+          currentCity:
+            normalized.city,
+
+          eventDate:
+            normalized.eventDate,
+
+          eventTime:
+            normalized.eventTime,
+
+          ndrReason:
+            normalized.ndrReason,
+
+          trackingDetails:
+            normalized.details,
+
+          trackonTrackingResponse:
+            raw,
+
+          lastTrackingSyncAt:
+            new Date().toISOString(),
+
+          lastTrackingError:
+            null,
+        };
+
         await upsertShipment(
           shipment.orderId,
-          {
-            trackingStatus:
-              normalized.status,
-
-            trackingCode:
-              normalized.trackingCode,
-
-            currentCity:
-              normalized.city,
-
-            eventDate:
-              normalized.eventDate,
-
-            eventTime:
-              normalized.eventTime,
-
-            ndrReason:
-              normalized.ndrReason,
-
-            trackingDetails:
-              normalized.details,
-
-            trackonTrackingResponse:
-              raw,
-
-            lastTrackingSyncAt:
-              new Date().toISOString(),
-
-            lastTrackingError:
-              null,
-          }
+          trackingPatch
         );
 
-        await syncShopifyMilestoneEvent(
-          shipment,
-          normalized
-        );
+        let currentShipment = {
+          ...shipment,
+          ...trackingPatch,
+        };
+
+        currentShipment =
+          await syncShopifyMilestones(
+            currentShipment,
+            normalized
+          );
 
         if (
-          shipment.orderGid &&
-          config.shopify.syncTrackingMetafields
+          currentShipment.orderGid &&
+          config.shopify
+            .syncTrackingMetafields
         ) {
           try {
             await syncTrackingMetafields({
               orderGid:
-                shipment.orderGid,
+                currentShipment.orderGid,
 
               status:
                 normalized.status,
@@ -394,21 +683,24 @@ export async function runTrackingSyncOnce() {
                 normalized.trackingCode,
 
               awb:
-                shipment.awb,
+                currentShipment.awb,
 
               shop:
-                shipment.shop ||
+                currentShipment.shop ||
                 config.shopify.shop,
             });
           } catch (metaError) {
             await upsertShipment(
-              shipment.orderId,
+              currentShipment.orderId,
               {
                 shopifyMetafieldSyncError:
                   String(
                     metaError?.message ||
                     metaError
-                  ).slice(0, 2000),
+                  ).slice(
+                    0,
+                    2000
+                  ),
               }
             );
           }
@@ -421,13 +713,23 @@ export async function runTrackingSyncOnce() {
           awb:
             shipment.awb,
 
-          ok: true,
+          ok:
+            true,
 
           status:
             normalized.status,
 
           trackingCode:
             normalized.trackingCode,
+
+          fulfilled:
+            Boolean(
+              currentShipment.shopifyFulfillmentId
+            ),
+
+          dispatchState:
+            currentShipment.dispatchState ||
+            "WAITING_FOR_PICKUP",
         });
       } catch (error) {
         await upsertShipment(
@@ -441,7 +743,10 @@ export async function runTrackingSyncOnce() {
                     )
                   : error?.message ||
                     error
-              ).slice(0, 5000),
+              ).slice(
+                0,
+                5000
+              ),
 
             lastTrackingSyncAt:
               new Date().toISOString(),
@@ -455,7 +760,8 @@ export async function runTrackingSyncOnce() {
           awb:
             shipment.awb,
 
-          ok: false,
+          ok:
+            false,
 
           error:
             String(
@@ -465,14 +771,20 @@ export async function runTrackingSyncOnce() {
         });
       }
 
-      if (!config.trackon.mock) {
+      if (
+        !config.trackon.mock
+      ) {
         await sleep(400);
       }
     }
 
     return {
-      skipped: false,
-      count: results.length,
+      skipped:
+        false,
+
+      count:
+        results.length,
+
       results,
     };
   } finally {
@@ -484,7 +796,8 @@ export function startTrackingWorker() {
   const minutes =
     Math.max(
       5,
-      config.trackon.pollMinutes
+      config.trackon
+        .pollMinutes
     );
 
   setInterval(() => {

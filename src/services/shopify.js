@@ -124,6 +124,7 @@ export async function createShopifyFulfillment({
   orderGid,
   awb,
   shop = config.shopify.shop,
+  notifyCustomer = config.shopify.notifyCustomer,
 }) {
   const order = await getFulfillmentOrders(orderGid, shop);
 
@@ -189,8 +190,10 @@ export async function createShopifyFulfillment({
         },
       ],
 
+      // For the Trackon flow this is passed as true only after
+      // Trackon confirms pickup success (PRSS).
       notifyCustomer:
-        config.shopify.notifyCustomer,
+        Boolean(notifyCustomer),
 
       trackingInfo,
     },
