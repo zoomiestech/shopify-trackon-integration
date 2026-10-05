@@ -375,6 +375,53 @@ export async function syncTrackingMetafields({
   return data.metafieldsSet?.metafields || [];
 }
 
+export async function addOrderTags({
+  orderGid,
+  tags,
+  shop = config.shopify.shop,
+}) {
+  const mutation = `
+    mutation BridgeOrderTagsAdd(
+      $id: ID!,
+      $tags: [String!]!
+    ) {
+      tagsAdd(
+        id: $id,
+        tags: $tags
+      ) {
+        node {
+          id
+        }
+
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const data = await shopifyGraphql(
+    mutation,
+    {
+      id: orderGid,
+      tags,
+    },
+    shop
+  );
+
+  const errors =
+    data.tagsAdd?.userErrors || [];
+
+  if (errors.length) {
+    throw new Error(
+      `Shopify tagsAdd error: ${JSON.stringify(errors)}`
+    );
+  }
+
+  return data.tagsAdd?.node || null;
+}
+
 export async function registerWebhook(
   topic,
   uri,
