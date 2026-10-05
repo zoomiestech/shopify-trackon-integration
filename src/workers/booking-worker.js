@@ -12,8 +12,17 @@ import {
 } from "../services/trackon.js";
 
 import {
+  addOrderTags,
+  syncTrackingMetafields,
+} from "../services/shopify.js";
+
+import {
   shouldBookOrder,
 } from "../lib/booking-tag.js";
+
+import {
+  publishBookingToShopify,
+} from "../lib/booking-publish.js";
 
 let running = false;
 
@@ -136,12 +145,61 @@ async function processOrderBooking(job) {
           null,
       }
     );
+
+    // Show the AWB in Shopify Admin now, without fulfilling the order.
+    const published =
+      await publishBookingToShopify(
+        {
+          orderGid,
+          awb:
+            booking.awb,
+          shop:
+            job.shop ||
+            config.shopify.shop,
+          bookedTag:
+            config.shopify.bookedTag,
+        },
+        {
+          syncTrackingMetafields,
+          addOrderTags,
+        }
+      );
+
+    if (published.ok) {
+      await upsertShipment(
+        orderId,
+        {
+          shopifyBookingPublishedAt:
+            new Date().toISOString(),
+          shopifyBookingPublishError:
+            null,
+        }
+      );
+    } else {
+      console.error(
+        `[booking] AWB ${booking.awb} saved, but Shopify update failed for order ${orderId}`,
+        published.errors
+      );
+
+      await upsertShipment(
+        orderId,
+        {
+          shopifyBookingPublishError:
+            published.errors
+              .join("; ")
+              .slice(0, 5000),
+          shopifyBookingPublishErrorAt:
+            new Date().toISOString(),
+        }
+      );
+    }
   }
 
   /**
    * Nothing else happens here.
    *
    * Shopify remains UNFULFILLED while Trackon has only created the AWB.
+   * It only gets the trackon.* metafields and the booked tag above.
    *
    * Later:
    * Trackon PRSS

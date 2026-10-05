@@ -62,6 +62,11 @@ export const config = {
       process.env.TRACKON_BOOKING_TAG ||
       "book-trackon",
 
+    // Added to the order once the Trackon AWB exists. Empty disables it.
+    bookedTag:
+      process.env.TRACKON_BOOKED_TAG ??
+      "trackon-booked",
+
     notifyCustomer: bool(
       process.env.SHOPIFY_NOTIFY_CUSTOMER,
       false

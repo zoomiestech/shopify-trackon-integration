@@ -17,6 +17,8 @@ Trackon booking
    ↓
 AWB persisted in MongoDB (Shopify order stays unfulfilled)
    ↓
+trackon.awb metafield + `trackon-booked` tag written to the Shopify order
+   ↓
 Trackon tracking polling
    ↓
 Trackon PRSS (pickup successful)
@@ -116,7 +118,13 @@ trackingStatus = AWB_CREATED
 dispatchState = WAITING_FOR_PICKUP
 ```
 
-The Shopify order stays unfulfilled until Trackon reports PRSS. Then it is
+The Shopify order gets the `trackon-booked` tag and the `trackon.awb`
+metafield straight away. To see the metafield on the order page, add an
+order metafield definition for `trackon.awb` (Settings > Custom data >
+Orders). If this Shopify update fails, the booking still stands and the
+error is saved as `shopifyBookingPublishError` on the shipment.
+
+The order stays unfulfilled until Trackon reports PRSS. Then it is
 fulfilled with the Trackon tracking number and the customer is emailed.
 
 ## Persistence test
