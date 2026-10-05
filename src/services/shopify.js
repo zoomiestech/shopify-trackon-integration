@@ -475,7 +475,8 @@ export async function registerDefaultWebhooks(
 
   const topics = [
     "ORDERS_CREATE",
-    "ORDERS_PAID",
+    // Fires when staff add the booking tag in Shopify Admin.
+    "ORDERS_UPDATED",
     "ORDERS_CANCELLED",
   ];
 

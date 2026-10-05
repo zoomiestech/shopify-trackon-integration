@@ -57,9 +57,10 @@ export const config = {
     staticAccessToken:
       process.env.SHOPIFY_ACCESS_TOKEN || "",
 
-    bookingTrigger:
-      process.env.BOOKING_TRIGGER ||
-      "orders_create",
+    // Trackon is booked only for orders carrying this tag.
+    bookingTag:
+      process.env.TRACKON_BOOKING_TAG ||
+      "book-trackon",
 
     notifyCustomer: bool(
       process.env.SHOPIFY_NOTIFY_CUSTOMER,
@@ -202,13 +203,15 @@ export function validateBaseConfig() {
     );
   }
 
-  if (
-    !["orders_create", "orders_paid"].includes(
-      config.shopify.bookingTrigger
-    )
-  ) {
+  if (!config.shopify.bookingTag.trim()) {
     errors.push(
-      "BOOKING_TRIGGER must be orders_create or orders_paid"
+      "TRACKON_BOOKING_TAG must not be empty"
+    );
+  }
+
+  if (process.env.BOOKING_TRIGGER) {
+    errors.push(
+      "BOOKING_TRIGGER is no longer used; Trackon is booked only for orders tagged with TRACKON_BOOKING_TAG"
     );
   }
 

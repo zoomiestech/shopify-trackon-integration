@@ -7,20 +7,29 @@ Version 2 replaces the old `data/store.json` persistence with MongoDB Atlas.
 ```text
 Shopify order
    ↓
-verified Shopify webhook
+staff add the `book-trackon` tag in Shopify Admin
+   ↓
+verified Shopify webhook (orders/create or orders/updated)
    ↓
 MongoDB-backed job queue
    ↓
 Trackon booking
    ↓
-AWB persisted in MongoDB
-   ↓
-Shopify fulfillment + tracking number
+AWB persisted in MongoDB (Shopify order stays unfulfilled)
    ↓
 Trackon tracking polling
    ↓
-latest status persisted + optional Shopify metafields
+Trackon PRSS (pickup successful)
+   ↓
+Shopify fulfillment + tracking number + customer email
+   ↓
+Out for delivery / delivered events + optional Shopify metafields
 ```
+
+Orders without the tag are ignored completely: no booking, no fulfillment
+and nothing stored in MongoDB. Each order is booked at most once; removing
+or re-adding the tag after booking does nothing, and nothing is cancelled
+at Trackon. The tag name is set by `TRACKON_BOOKING_TAG`.
 
 ## Why MongoDB was added
 
@@ -57,13 +66,14 @@ PUBLIC_BASE_URL=https://YOUR-RENDER-URL
 ADMIN_API_KEY=...
 
 TRACKON_MOCK=true
-BOOKING_TRIGGER=orders_create
+TRACKON_BOOKING_TAG=book-trackon
 SHOPIFY_NOTIFY_CUSTOMER=false
 ```
 
 Test:
 
 ```bash
+npm test
 npm run test:mongodb
 npm run test:shopify
 npm run register-webhooks
@@ -82,7 +92,7 @@ Create one Shopify order with:
 - phone
 - product with weight
 
-Then inspect:
+Then add the `book-trackon` tag to the order in Shopify Admin, and inspect:
 
 ```http
 GET /admin/jobs
@@ -102,11 +112,12 @@ Expected shipment data includes:
 orderId
 orderName
 awb
-trackingStatus = BOOKED
-shopifyFulfillmentId
+trackingStatus = AWB_CREATED
+dispatchState = WAITING_FOR_PICKUP
 ```
 
-The Shopify order should show a Trackon tracking number.
+The Shopify order stays unfulfilled until Trackon reports PRSS. Then it is
+fulfilled with the Trackon tracking number and the customer is emailed.
 
 ## Persistence test
 

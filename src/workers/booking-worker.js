@@ -11,13 +11,16 @@ import {
   createTrackonBooking,
 } from "../services/trackon.js";
 
+import {
+  shouldBookOrder,
+} from "../lib/booking-tag.js";
+
 let running = false;
 
-function topicToTrigger(topic) {
-  return String(topic || "")
-    .toLowerCase()
-    .replace("/", "_");
-}
+const BOOKING_TOPICS = new Set([
+  "orders/create",
+  "orders/updated",
+]);
 
 async function processOrderBooking(job) {
   const order = job.payload;
@@ -48,6 +51,22 @@ async function processOrderBooking(job) {
 
   let shipment =
     await getShipment(orderId);
+
+  // Re-checked here, not only at the webhook: the tag may have been
+  // removed, or an earlier job may have booked the AWB already.
+  if (
+    !shouldBookOrder({
+      order,
+      shipment,
+      tag:
+        config.shopify.bookingTag,
+    })
+  ) {
+    console.log(
+      `[booking] Skipped order ${orderId}: no "${config.shopify.bookingTag}" tag or AWB already exists`
+    );
+    return;
+  }
 
   await upsertShipment(
     orderId,
@@ -185,13 +204,10 @@ async function processJob(job) {
     );
   }
 
-  const expected =
-    config.shopify
-      .bookingTrigger;
-
+  // orders/paid and other topics may still arrive from old
+  // webhook subscriptions; they never book.
   if (
-    topicToTrigger(topic) !==
-    expected
+    !BOOKING_TOPICS.has(topic)
   ) {
     return;
   }

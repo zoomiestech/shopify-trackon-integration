@@ -16,10 +16,12 @@
 - [ ] `PUBLIC_BASE_URL` is the live Render URL
 - [ ] `npm run register-webhooks` succeeds
 - [ ] `TRACKON_MOCK=true`
-- [ ] new Shopify test order created
-- [ ] `/admin/jobs` shows `orders/create` done
-- [ ] `/admin/shipments` contains mock AWB
-- [ ] Shopify order is fulfilled with Trackon mock AWB
+- [ ] new Shopify test order created, without the `book-trackon` tag
+- [ ] `/admin/shipments` does not contain it
+- [ ] `book-trackon` tag added to the order in Shopify Admin
+- [ ] `/admin/jobs` shows `orders/updated` done
+- [ ] `/admin/shipments` contains mock AWB with `dispatchState = WAITING_FOR_PICKUP`
+- [ ] Shopify order is still unfulfilled (fulfillment waits for Trackon PRSS)
 
 ## Persistence
 - [ ] Restart/redeploy Render

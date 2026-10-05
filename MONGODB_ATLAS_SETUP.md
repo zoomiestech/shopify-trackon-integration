@@ -85,7 +85,7 @@ Keep:
 
 ```env
 TRACKON_MOCK=true
-BOOKING_TRIGGER=orders_create
+TRACKON_BOOKING_TAG=book-trackon
 SHOPIFY_NOTIFY_CUSTOMER=false
 ```
 
