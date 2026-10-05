@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { config, validateBaseConfig } from "./config.js";
 import { connectMongo, mongoStatus } from "./lib/mongodb.js";
 import { verifyShopifyWebhook } from "./lib/hmac.js";
+import { shouldEnqueueOrderWebhook } from "./lib/booking-tag.js";
 import {
   recordWebhookAndEnqueue,
   listShipments,
@@ -70,6 +71,27 @@ app.post(
       const payload = JSON.parse(
         req.body.toString("utf8")
       );
+
+      // Most order webhooks (every edit of every order) are not ours to
+      // act on. Acknowledge them without storing anything.
+      const shipment = payload?.id
+        ? await getShipment(payload.id)
+        : null;
+
+      if (
+        !shouldEnqueueOrderWebhook({
+          topic,
+          order: payload,
+          shipment,
+          tag: config.shopify.bookingTag,
+        })
+      ) {
+        return res.status(200).json({
+          ok: true,
+          ignored: true,
+          eventId,
+        });
+      }
 
       const result =
         await recordWebhookAndEnqueue({
@@ -148,8 +170,8 @@ app.get("/health", async (req, res) => {
     trackonMock: config.trackon.mock,
     shopifyApiVersion:
       config.shopify.apiVersion,
-    bookingTrigger:
-      config.shopify.bookingTrigger,
+    bookingTag:
+      config.shopify.bookingTag,
     time: new Date().toISOString(),
   });
 });
@@ -251,8 +273,8 @@ app.get(
           config.shopify.authMode,
         shopifyApiVersion:
           config.shopify.apiVersion,
-        bookingTrigger:
-          config.shopify.bookingTrigger,
+        bookingTag:
+          config.shopify.bookingTag,
         trackonMock:
           config.trackon.mock,
         trackonServiceType:
@@ -360,15 +382,10 @@ app.post(
       });
     }
 
-    const triggerTopic =
-      config.shopify.bookingTrigger ===
-      "orders_paid"
-        ? "orders/paid"
-        : "orders/create";
-
+    // The worker still requires the booking tag on the stored payload.
     const job = await enqueueJob({
       type: "manual_retry",
-      topic: triggerTopic,
+      topic: "orders/updated",
       shop:
         shipment.shop ||
         config.shopify.shop,
@@ -444,7 +461,7 @@ app.listen(config.port, () => {
     `Trackon mock mode: ${config.trackon.mock}`
   );
   console.log(
-    `Booking trigger: ${config.shopify.bookingTrigger}`
+    `Booking tag: ${config.shopify.bookingTag}`
   );
 });
 

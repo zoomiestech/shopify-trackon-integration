@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "test": "node --test \"test/**/*.test.js\"",
     "register-webhooks": "node scripts/register-webhooks.js",
     "test:shopify": "node scripts/test-shopify.js",
     "test:mongodb": "node scripts/test-mongodb.js",
