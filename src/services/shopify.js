@@ -1,6 +1,7 @@
 import axios from "axios";
 import { config } from "../config.js";
 import { getShopifyAccessToken } from "./shopify-auth.js";
+import { buildTrackingMetafields } from "../lib/tracking-metafields.js";
 
 export async function shopifyGraphql(
   query,
@@ -339,22 +340,14 @@ export async function syncTrackingMetafields({
     }
   `;
 
-  const entries = [
-    ["current_status", status || ""],
-    ["current_city", city || ""],
-    ["tracking_code", trackingCode || ""],
-    ["awb", awb || ""],
-    ["last_synced_at", new Date().toISOString()],
-  ];
-
   const variables = {
-    metafields: entries.map(([key, value]) => ({
-      ownerId: orderGid,
-      namespace: "trackon",
-      key,
-      type: "single_line_text_field",
-      value: String(value).slice(0, 255),
-    })),
+    metafields: buildTrackingMetafields({
+      orderGid,
+      status,
+      city,
+      trackingCode,
+      awb,
+    }),
   };
 
   const data = await shopifyGraphql(
