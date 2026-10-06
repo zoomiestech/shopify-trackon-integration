@@ -31,7 +31,7 @@ export const config = {
 
   mongodb: {
     uri: process.env.MONGODB_URI || "",
-    dbName: process.env.MONGODB_DB || "shopify_trackon",
+    dbName: process.env.MONGODB_DB,
   },
 
   shopify: {
