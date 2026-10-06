@@ -225,7 +225,15 @@ export async function trackTrackonAwb(awb) {
 }
 
 export function normalizeTrackonTracking(data) {
-  const summary = data?.summaryTrack || data?.SummaryTrack || data?.summary || {};
+  // Trackon fills CustomersummaryTrack and leaves summaryTrack null for
+  // customer-code accounts like ours.
+  const summary =
+    data?.summaryTrack ||
+    data?.SummaryTrack ||
+    data?.CustomersummaryTrack ||
+    data?.CustomerSummaryTrack ||
+    data?.summary ||
+    {};
   return {
     awb: summary.AWBNO || summary.AWBNo || summary.awb || "",
     status: summary.CURRENT_STATUS || summary.CurrentStatus || "",
