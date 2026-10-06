@@ -7,7 +7,7 @@ Version 2 replaces the old `data/store.json` persistence with MongoDB Atlas.
 ```text
 Shopify order
    ↓
-staff add the `book-trackon` tag in Shopify Admin
+staff add a booking tag in Shopify Admin (see "Choosing Air or SF" below)
    ↓
 verified Shopify webhook (orders/create or orders/updated)
    ↓
@@ -32,6 +32,26 @@ Orders without the tag are ignored completely: no booking, no fulfillment
 and nothing stored in MongoDB. Each order is booked at most once; removing
 or re-adding the tag after booking does nothing, and nothing is cancelled
 at Trackon. The tag name is set by `TRACKON_BOOKING_TAG`.
+
+## Choosing Air or SF
+
+Trackon's `TypeOfService` is chosen per order by the booking tag, not by an
+environment variable:
+
+| Tag | TypeOfService |
+|---|---|
+| `book-trackon-air` | `Air` |
+| `book-trackon-sf` | `SF` (surface) |
+| `book-trackon` | `SF` (surface) |
+
+An order with both `book-trackon-air` and `book-trackon-sf` is not booked:
+it gets the `trackon-booking-failed` tag at once and the reason in
+`trackon.history`. Remove one of the two tags, then `trackon-booking-failed`,
+to book it. The mode used is shown in the history's booking line and saved
+on the shipment as `typeOfService`.
+
+`TRACKON_SERVICE_TYPE` stays an environment variable, because it must match
+the AWB number series Trackon issued (10 = Standard, 50 = Parcel, ...).
 
 ## What staff see in Shopify
 
@@ -114,7 +134,8 @@ Create one Shopify order with:
 - phone
 - product with weight
 
-Then add the `book-trackon` tag to the order in Shopify Admin, and inspect:
+Then add the `book-trackon-sf` (or `book-trackon-air`) tag to the order in
+Shopify Admin, and inspect:
 
 ```http
 GET /admin/jobs

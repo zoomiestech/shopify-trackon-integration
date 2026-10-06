@@ -33,7 +33,10 @@ function itemDescription(order) {
   return text(titles || "Shopify order", 100);
 }
 
-export function mapShopifyOrderToTrackon(order) {
+// typeOfService (Air or SF) comes from the order's booking tag.
+export function mapShopifyOrderToTrackon(order, { typeOfService } = {}) {
+  if (!typeOfService) throw new Error("Trackon TypeOfService (Air or SF) is missing.");
+
   const addr = order.shipping_address;
   if (!addr) throw new Error("Shopify order has no shipping address.");
 
@@ -61,7 +64,7 @@ export function mapShopifyOrderToTrackon(order) {
     Email: text(order.email || order.contact_email, 30),
 
     DocType: "N",
-    TypeOfService: text(config.trackon.typeOfService, 20),
+    TypeOfService: text(typeOfService, 20),
     Weight: calculateWeightKg(order),
     InvoiceValue: text(order.current_total_price || order.total_price || "0", 20),
     NoOfPieces: String(config.trackon.defaultPieces || 1),
@@ -133,8 +136,8 @@ function assertRealCredentials() {
   if (missing.length) throw new Error(`Missing Trackon credentials: ${missing.join(", ")}`);
 }
 
-export async function createTrackonBooking(order) {
-  const payload = mapShopifyOrderToTrackon(order);
+export async function createTrackonBooking(order, { typeOfService } = {}) {
+  const payload = mapShopifyOrderToTrackon(order, { typeOfService });
 
   if (config.trackon.mock) {
     const awb = mockAwb(payload.RefNo);

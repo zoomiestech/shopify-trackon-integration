@@ -4,6 +4,8 @@ import {
   hasBookingTag,
   shouldEnqueueOrderWebhook,
   shouldBookOrder,
+  bookingChoice,
+  bookingTags,
 } from "../src/lib/booking-tag.js";
 
 const TAG = "book-trackon";
@@ -106,4 +108,40 @@ test("an order tagged trackon-booking-failed is not booked until staff remove th
     shouldEnqueueOrderWebhook({ topic: "orders/updated", order, shipment: null, tag: TAG }),
     false
   );
+});
+
+test("bookingTags lists the plain, SF and Air tags", () => {
+  assert.deepEqual(bookingTags(TAG), {
+    plain: "book-trackon",
+    sf: "book-trackon-sf",
+    air: "book-trackon-air",
+  });
+});
+
+test("the plain tag and the SF tag book by surface", () => {
+  assert.deepEqual(bookingChoice({ tags: "book-trackon" }, TAG), { book: true, typeOfService: "SF", conflict: false });
+  assert.deepEqual(bookingChoice({ tags: "Book-Trackon-SF" }, TAG), { book: true, typeOfService: "SF", conflict: false });
+});
+
+test("the Air tag books by air, even next to the plain tag", () => {
+  assert.deepEqual(bookingChoice({ tags: "book-trackon-air" }, TAG), { book: true, typeOfService: "Air", conflict: false });
+  assert.deepEqual(bookingChoice({ tags: "book-trackon, book-trackon-air" }, TAG), { book: true, typeOfService: "Air", conflict: false });
+});
+
+test("both the Air and SF tags is a conflict", () => {
+  assert.deepEqual(bookingChoice({ tags: "book-trackon-air, book-trackon-sf" }, TAG), { book: true, typeOfService: null, conflict: true });
+});
+
+test("no booking tag means no booking", () => {
+  assert.deepEqual(bookingChoice({ tags: "vip, book-trackon-later" }, TAG), { book: false, typeOfService: null, conflict: false });
+  assert.deepEqual(bookingChoice({ tags: "book-trackon-air" }, ""), { book: false, typeOfService: null, conflict: false });
+});
+
+test("the Air and SF tags trigger booking and webhooks like the plain tag", () => {
+  for (const tags of ["book-trackon-air", "book-trackon-sf", "book-trackon-air, book-trackon-sf"]) {
+    const order = { tags };
+    assert.equal(shouldBookOrder({ order, shipment: null, tag: TAG }), true);
+    assert.equal(shouldEnqueueOrderWebhook({ topic: "orders/updated", order, shipment: null, tag: TAG }), true);
+    assert.equal(shouldEnqueueOrderWebhook({ topic: "orders/cancelled", order, shipment: null, tag: TAG }), true);
+  }
 });

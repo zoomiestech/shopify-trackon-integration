@@ -3,7 +3,10 @@ import crypto from "node:crypto";
 import { config, validateBaseConfig } from "./config.js";
 import { connectMongo, mongoStatus } from "./lib/mongodb.js";
 import { verifyShopifyWebhook } from "./lib/hmac.js";
-import { shouldEnqueueOrderWebhook } from "./lib/booking-tag.js";
+import {
+  shouldEnqueueOrderWebhook,
+  bookingTags,
+} from "./lib/booking-tag.js";
 import {
   recordWebhookAndEnqueue,
   listShipments,
@@ -279,9 +282,9 @@ app.get(
           config.trackon.mock,
         trackonServiceType:
           config.trackon.serviceType,
-        trackonTypeOfServiceConfigured:
-          Boolean(
-            config.trackon.typeOfService
+        bookingTags:
+          bookingTags(
+            config.shopify.bookingTag
           ),
         trackonCredentialsConfigured:
           Boolean(

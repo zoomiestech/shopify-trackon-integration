@@ -95,6 +95,7 @@ export async function completeJob(id) {
 }
 
 // Returns { final: true } once the job has used its last attempt.
+// An error marked permanent (retrying cannot fix it) fails the job at once.
 export async function failJob(id, error, retryDelaySeconds = 60) {
   const job = await Job.findOne({ jobId: id });
   if (!job) return { final: false };
@@ -102,7 +103,7 @@ export async function failJob(id, error, retryDelaySeconds = 60) {
   const maxAttempts = 5;
   job.error = String(error?.message || error || "Unknown job error");
 
-  if ((job.attempts || 0) >= maxAttempts) {
+  if (error?.permanent || (job.attempts || 0) >= maxAttempts) {
     job.status = "failed";
   } else {
     job.status = "pending";

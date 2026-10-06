@@ -19,7 +19,8 @@ import {
 
 import {
   shouldBookOrder,
-  hasBookingTag,
+  bookingChoice,
+  bookingTags,
   BOOKING_FAILED_TAG,
 } from "../lib/booking-tag.js";
 
@@ -80,7 +81,7 @@ async function processOrderBooking(job) {
     })
   ) {
     console.log(
-      `[booking] Skipped order ${orderId}: no "${config.shopify.bookingTag}" tag or AWB already exists`
+      `[booking] Skipped order ${orderId}: no booking tag, a ${BOOKING_FAILED_TAG} tag, or an AWB already exists`
     );
     return;
   }
@@ -119,9 +120,33 @@ async function processOrderBooking(job) {
    * (Pickup Closure - Successful / Pickup Successful).
    */
   if (!shipment?.awb) {
+    const choice =
+      bookingChoice(
+        order,
+        config.shopify.bookingTag
+      );
+
+    if (choice.conflict) {
+      const tags =
+        bookingTags(
+          config.shopify.bookingTag
+        );
+
+      const conflict = new Error(
+        `The order has both ${tags.air} and ${tags.sf} tags. Keep only one`
+      );
+      // Retrying cannot fix a conflicting choice; report it straight away.
+      conflict.permanent = true;
+      throw conflict;
+    }
+
     const booking =
       await createTrackonBooking(
-        order
+        order,
+        {
+          typeOfService:
+            choice.typeOfService,
+        }
       );
 
     const bookedAt =
@@ -134,7 +159,7 @@ async function processOrderBooking(job) {
           {
             key: "booked",
             at: bookedAt,
-            text: `Booked with Trackon. AWB ${booking.awb}. Waiting for pickup.`,
+            text: `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}. Waiting for pickup.`,
           },
         ]
       );
@@ -163,6 +188,9 @@ async function processOrderBooking(job) {
 
         bookingCreatedAt:
           bookedAt,
+
+        typeOfService:
+          choice.typeOfService,
 
         history,
 
@@ -301,10 +329,10 @@ async function reportFinalBookingFailure(
   if (
     !order?.id ||
     !BOOKING_TOPICS.has(topic) ||
-    !hasBookingTag(
+    !bookingChoice(
       order,
       config.shopify.bookingTag
-    )
+    ).book
   ) {
     return;
   }
@@ -341,7 +369,9 @@ async function reportFinalBookingFailure(
           key: `booking-failed:${now}`,
           at: now,
           text:
-            `Booking failed after ${job.attempts || 1} attempts: ${reason}. ` +
+            (error?.permanent
+              ? `Booking not attempted: ${reason}. `
+              : `Booking failed after ${job.attempts || 1} attempts: ${reason}. `) +
             `Fix the order, then remove the ${BOOKING_FAILED_TAG} tag to retry.`,
         },
       ]
