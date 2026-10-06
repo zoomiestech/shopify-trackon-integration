@@ -1,6 +1,7 @@
 import axios from "axios";
 import crypto from "node:crypto";
 import { config } from "../config.js";
+import { bookingRejectionMessage } from "../lib/trackon-response.js";
 
 function text(value, max = 9999) {
   if (value === undefined || value === null) return "";
@@ -32,7 +33,10 @@ function itemDescription(order) {
   return text(titles || "Shopify order", 100);
 }
 
-export function mapShopifyOrderToTrackon(order) {
+// typeOfService (Air or SF) comes from the order's booking tag.
+export function mapShopifyOrderToTrackon(order, { typeOfService } = {}) {
+  if (!typeOfService) throw new Error("Trackon TypeOfService (Air or SF) is missing.");
+
   const addr = order.shipping_address;
   if (!addr) throw new Error("Shopify order has no shipping address.");
 
@@ -60,7 +64,7 @@ export function mapShopifyOrderToTrackon(order) {
     Email: text(order.email || order.contact_email, 30),
 
     DocType: "N",
-    TypeOfService: text(config.trackon.typeOfService, 20),
+    TypeOfService: text(typeOfService, 20),
     Weight: calculateWeightKg(order),
     InvoiceValue: text(order.current_total_price || order.total_price || "0", 20),
     NoOfPieces: String(config.trackon.defaultPieces || 1),
@@ -132,8 +136,8 @@ function assertRealCredentials() {
   if (missing.length) throw new Error(`Missing Trackon credentials: ${missing.join(", ")}`);
 }
 
-export async function createTrackonBooking(order) {
-  const payload = mapShopifyOrderToTrackon(order);
+export async function createTrackonBooking(order, { typeOfService } = {}) {
+  const payload = mapShopifyOrderToTrackon(order, { typeOfService });
 
   if (config.trackon.mock) {
     const awb = mockAwb(payload.RefNo);
@@ -167,6 +171,13 @@ export async function createTrackonBooking(order) {
     data = response.data;
   }
 
+  const rejection = bookingRejectionMessage(data);
+  if (rejection) {
+    const err = new Error(rejection);
+    err.trackonResponse = data;
+    throw err;
+  }
+
   const awb = findAwbRecursive(data);
   if (!awb) {
     const err = new Error(
@@ -187,8 +198,9 @@ export async function trackTrackonAwb(awb) {
         CURRENT_STATUS: "MOCK - SHIPMENT BOOKED",
         CURRENT_CITY: "",
         TRACKING_CODE: "BOKN",
-        EVENTDATE: new Date().toISOString().slice(0, 10),
-        EVENTTIME: new Date().toTimeString().slice(0, 8),
+        // No scan time in mock mode, so polls do not add a history line each time.
+        EVENTDATE: "",
+        EVENTTIME: "",
         NDR_REASON: "",
       },
       lstDetails: [],
@@ -213,7 +225,15 @@ export async function trackTrackonAwb(awb) {
 }
 
 export function normalizeTrackonTracking(data) {
-  const summary = data?.summaryTrack || data?.SummaryTrack || data?.summary || {};
+  // Trackon fills CustomersummaryTrack and leaves summaryTrack null for
+  // customer-code accounts like ours.
+  const summary =
+    data?.summaryTrack ||
+    data?.SummaryTrack ||
+    data?.CustomersummaryTrack ||
+    data?.CustomerSummaryTrack ||
+    data?.summary ||
+    {};
   return {
     awb: summary.AWBNO || summary.AWBNo || summary.awb || "",
     status: summary.CURRENT_STATUS || summary.CurrentStatus || "",

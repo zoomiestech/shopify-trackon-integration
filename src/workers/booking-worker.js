@@ -13,16 +13,25 @@ import {
 
 import {
   addOrderTags,
+  removeOrderTags,
   syncTrackingMetafields,
 } from "../services/shopify.js";
 
 import {
   shouldBookOrder,
+  bookingChoice,
+  bookingTags,
+  BOOKING_FAILED_TAG,
 } from "../lib/booking-tag.js";
 
 import {
   publishBookingToShopify,
 } from "../lib/booking-publish.js";
+
+import {
+  mergeHistory,
+  renderHistory,
+} from "../lib/trackon-history.js";
 
 let running = false;
 
@@ -72,7 +81,7 @@ async function processOrderBooking(job) {
     })
   ) {
     console.log(
-      `[booking] Skipped order ${orderId}: no "${config.shopify.bookingTag}" tag or AWB already exists`
+      `[booking] Skipped order ${orderId}: no booking tag, a ${BOOKING_FAILED_TAG} tag, or an AWB already exists`
     );
     return;
   }
@@ -111,9 +120,48 @@ async function processOrderBooking(job) {
    * (Pickup Closure - Successful / Pickup Successful).
    */
   if (!shipment?.awb) {
+    const choice =
+      bookingChoice(
+        order,
+        config.shopify.bookingTag
+      );
+
+    if (choice.conflict) {
+      const tags =
+        bookingTags(
+          config.shopify.bookingTag
+        );
+
+      const conflict = new Error(
+        `The order has both ${tags.air} and ${tags.sf} tags. Keep only one`
+      );
+      // Retrying cannot fix a conflicting choice; report it straight away.
+      conflict.permanent = true;
+      throw conflict;
+    }
+
     const booking =
       await createTrackonBooking(
-        order
+        order,
+        {
+          typeOfService:
+            choice.typeOfService,
+        }
+      );
+
+    const bookedAt =
+      new Date().toISOString();
+
+    const history =
+      mergeHistory(
+        shipment?.history,
+        [
+          {
+            key: "booked",
+            at: bookedAt,
+            text: `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}. Waiting for pickup.`,
+          },
+        ]
       );
 
     await upsertShipment(
@@ -139,7 +187,12 @@ async function processOrderBooking(job) {
           "WAITING_FOR_PICKUP",
 
         bookingCreatedAt:
-          new Date().toISOString(),
+          bookedAt,
+
+        typeOfService:
+          choice.typeOfService,
+
+        history,
 
         lastError:
           null,
@@ -158,10 +211,17 @@ async function processOrderBooking(job) {
             config.shopify.shop,
           bookedTag:
             config.shopify.bookedTag,
+          history:
+            renderHistory(history),
+          removeTags:
+            shipment?.bookingFailedTaggedAt
+              ? [BOOKING_FAILED_TAG]
+              : [],
         },
         {
           syncTrackingMetafields,
           addOrderTags,
+          removeOrderTags,
         }
       );
 
@@ -172,6 +232,8 @@ async function processOrderBooking(job) {
           shopifyBookingPublishedAt:
             new Date().toISOString(),
           shopifyBookingPublishError:
+            null,
+          bookingFailedTaggedAt:
             null,
         }
       );
@@ -247,6 +309,126 @@ async function processCancellation(
   );
 }
 
+/**
+ * Every attempt failed. Tell staff in Shopify: the trackon-booking-failed
+ * tag to filter on, and the reason in trackon.history. Staff fix the order
+ * and remove the tag, which sends orders/updated and books again.
+ */
+async function reportFinalBookingFailure(
+  job,
+  error
+) {
+  const order =
+    job.payload;
+
+  const topic =
+    String(
+      job.topic || ""
+    ).toLowerCase();
+
+  if (
+    !order?.id ||
+    !BOOKING_TOPICS.has(topic) ||
+    !bookingChoice(
+      order,
+      config.shopify.bookingTag
+    ).book
+  ) {
+    return;
+  }
+
+  const orderId =
+    String(order.id);
+
+  const shipment =
+    await getShipment(orderId);
+
+  if (shipment?.awb) {
+    return;
+  }
+
+  const orderGid =
+    shipment?.orderGid ||
+    order.admin_graphql_api_id ||
+    `gid://shopify/Order/${order.id}`;
+
+  const now =
+    new Date().toISOString();
+
+  const reason =
+    String(
+      error?.message ||
+      error
+    ).slice(0, 300);
+
+  const history =
+    mergeHistory(
+      shipment?.history,
+      [
+        {
+          key: `booking-failed:${now}`,
+          at: now,
+          text:
+            (error?.permanent
+              ? `Booking not attempted: ${reason}. `
+              : `Booking failed after ${job.attempts || 1} attempts: ${reason}. `) +
+            `Fix the order, then remove the ${BOOKING_FAILED_TAG} tag to retry.`,
+        },
+      ]
+    );
+
+  await upsertShipment(
+    orderId,
+    { history }
+  );
+
+  try {
+    await addOrderTags({
+      orderGid,
+      tags: [BOOKING_FAILED_TAG],
+      shop:
+        job.shop ||
+        config.shopify.shop,
+    });
+
+    await upsertShipment(
+      orderId,
+      {
+        bookingFailedTaggedAt:
+          now,
+      }
+    );
+
+    await syncTrackingMetafields({
+      orderGid,
+      status:
+        "BOOKING_FAILED",
+      history:
+        renderHistory(history),
+      shop:
+        job.shop ||
+        config.shopify.shop,
+    });
+  } catch (reportError) {
+    console.error(
+      `[booking] Could not report the booking failure to Shopify for order ${orderId}`,
+      reportError?.response?.data ||
+      reportError
+    );
+
+    await upsertShipment(
+      orderId,
+      {
+        shopifyBookingFailureReportError:
+          String(
+            reportError?.message ||
+            reportError
+          ).slice(0, 2000),
+      }
+    );
+  }
+}
+
 async function processJob(job) {
   const topic =
     String(
@@ -308,16 +490,17 @@ export async function runBookingWorkerOnce() {
         error
       );
 
-      await failJob(
-        job.jobId ||
-        job.id,
-        error,
-        Math.min(
-          60 *
-            (job.attempts || 1),
-          300
-        )
-      );
+      const { final } =
+        await failJob(
+          job.jobId ||
+          job.id,
+          error,
+          Math.min(
+            60 *
+              (job.attempts || 1),
+            300
+          )
+        );
 
       const orderId =
         job.payload?.id;
@@ -343,6 +526,13 @@ export async function runBookingWorkerOnce() {
             lastErrorAt:
               new Date().toISOString(),
           }
+        );
+      }
+
+      if (final) {
+        await reportFinalBookingFailure(
+          job,
+          error
         );
       }
     }

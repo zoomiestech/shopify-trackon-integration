@@ -31,7 +31,7 @@ export const config = {
 
   mongodb: {
     uri: process.env.MONGODB_URI || "",
-    dbName: process.env.MONGODB_DB || "shopify_trackon",
+    dbName: process.env.MONGODB_DB,
   },
 
   shopify: {
@@ -110,9 +110,6 @@ export const config = {
 
     pickupCustomerCode:
       process.env.TRACKON_PICKUP_CUSTOMER_CODE || "",
-
-    typeOfService:
-      process.env.TRACKON_TYPE_OF_SERVICE || "",
 
     serviceType:
       process.env.TRACKON_SERVICE_TYPE || "",
@@ -211,6 +208,12 @@ export function validateBaseConfig() {
   if (!config.shopify.bookingTag.trim()) {
     errors.push(
       "TRACKON_BOOKING_TAG must not be empty"
+    );
+  }
+
+  if (process.env.TRACKON_TYPE_OF_SERVICE) {
+    errors.push(
+      "TRACKON_TYPE_OF_SERVICE is no longer used; Air or SF is chosen per order with the booking tag"
     );
   }
 

@@ -58,3 +58,28 @@ test("every metafield is single line text in the trackon namespace, max 255 char
     ["current_status", "current_city", "tracking_code", "awb", "last_synced_at"]
   );
 });
+
+test("history is a multi-line text metafield and is not cut to 255 chars", () => {
+  const history = "06/10/2026 13:58  Booked\n".repeat(20).trim();
+  const metafields = buildTrackingMetafields({
+    orderGid: "gid://shopify/Order/1",
+    status: "AWB_CREATED",
+    awb: "1",
+    history,
+    now,
+  });
+
+  const field = metafields.find((m) => m.key === "history");
+  assert.equal(field.type, "multi_line_text_field");
+  assert.equal(field.value, history);
+});
+
+test("an empty history is left out like any other blank value", () => {
+  const metafields = buildTrackingMetafields({
+    orderGid: "gid://shopify/Order/1",
+    awb: "1",
+    history: "",
+    now,
+  });
+  assert.equal(metafields.some((m) => m.key === "history"), false);
+});
