@@ -2,6 +2,10 @@ import axios from "axios";
 import crypto from "node:crypto";
 import { config } from "../config.js";
 import { bookingRejectionMessage } from "../lib/trackon-response.js";
+import { normalizeTrackonTracking } from "../lib/tracking-rows.js";
+import { buildMockTrackingResponse } from "../lib/mock-tracking.js";
+
+export { normalizeTrackonTracking };
 
 function text(value, max = 9999) {
   if (value === undefined || value === null) return "";
@@ -190,22 +194,10 @@ export async function createTrackonBooking(order, { typeOfService } = {}) {
   return { awb, payload, response: data };
 }
 
-export async function trackTrackonAwb(awb) {
+// mockScans: fake scans added through /admin/mock-scan, used only in mock mode.
+export async function trackTrackonAwb(awb, { mockScans } = {}) {
   if (config.trackon.mock) {
-    return {
-      summaryTrack: {
-        AWBNO: String(awb),
-        CURRENT_STATUS: "MOCK - SHIPMENT BOOKED",
-        CURRENT_CITY: "",
-        TRACKING_CODE: "BOKN",
-        // No scan time in mock mode, so polls do not add a history line each time.
-        EVENTDATE: "",
-        EVENTTIME: "",
-        NDR_REASON: "",
-      },
-      lstDetails: [],
-      ResponseStatus: { ErrorCode: null, Message: "SUCCESS", Errors: null },
-    };
+    return buildMockTrackingResponse(awb, mockScans);
   }
 
   assertRealCredentials();
@@ -224,26 +216,3 @@ export async function trackTrackonAwb(awb) {
   return data;
 }
 
-export function normalizeTrackonTracking(data) {
-  // Trackon fills CustomersummaryTrack and leaves summaryTrack null for
-  // customer-code accounts like ours.
-  const summary =
-    data?.summaryTrack ||
-    data?.SummaryTrack ||
-    data?.CustomersummaryTrack ||
-    data?.CustomerSummaryTrack ||
-    data?.summary ||
-    {};
-  return {
-    awb: summary.AWBNO || summary.AWBNo || summary.awb || "",
-    status: summary.CURRENT_STATUS || summary.CurrentStatus || "",
-    city: summary.CURRENT_CITY || summary.CurrentCity || "",
-    trackingCode: summary.TRACKING_CODE || summary.TrackingCode || "",
-    eventDate: summary.EVENTDATE || "",
-    eventTime: summary.EVENTTIME || "",
-    ndrReason: summary.NDR_REASON || "",
-    details: data?.lstDetails || data?.LstDetails || data?.details || [],
-    responseStatus: data?.ResponseStatus || data?.responseStatus || null,
-    raw: data,
-  };
-}

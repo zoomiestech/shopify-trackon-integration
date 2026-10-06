@@ -168,6 +168,40 @@ error is saved as `shopifyBookingPublishError` on the shipment.
 The order stays unfulfilled until Trackon reports PRSS. Then it is
 fulfilled with the Trackon tracking number and the customer is emailed.
 
+## Testing every tracking step in development
+
+With `TRACKON_MOCK=true`, fake Trackon scans can be added to a booked order.
+Mock tracking returns them in Trackon's live response shape, so the real
+tracking code handles them exactly as it would a courier's scans. The
+endpoint returns 404 when `TRACKON_MOCK` is not `true`.
+
+```bash
+curl -X POST "https://DEV-URL/admin/mock-scan/<orderId>?run=true" \
+  -H "x-admin-key: KEY" -H "Content-Type: application/json" \
+  -d '{"code": "PRSS"}'
+```
+
+`<orderId>` is the number in the Shopify order URL. `?run=true` polls at
+once and returns this order's result. Optional fields: `status` (the
+reason text, e.g. `"UNDELIVERED DUE TO DOOR LOCKED"`) and `city`. An
+unknown code is refused with the list of valid codes.
+
+Use your own email as the customer: real Shopify emails are sent.
+
+| Order | Send, in turn | Expect in Shopify |
+|---|---|---|
+| A, tagged `book-trackon-sf` | `PRSN` | `trackon-pickup-failed` tag, history line |
+| | `PRSS` | fulfilled with the AWB, shipping email, pickup tag cleared |
+| | `DRSG` | "Out for delivery" event |
+| | `DNUB` with a `status` | "Attempted delivery" event, `trackon-delivery-failed` tag |
+| | `DDUB` | "Delivered" event, tag cleared, polling stops |
+| B, tagged `book-trackon-air` | `PRSS`, then `RSET` | `trackon-rto` tag |
+| | `RHOD` | polling stops |
+| C, tagged `book-trackon-air` and `book-trackon-sf` | nothing | `trackon-booking-failed` at once |
+
+Each step also adds a line to `trackon.history`. Scans sent after
+delivery or RHOD are stored but not polled.
+
 ## Persistence test
 
 After a successful mock order:
@@ -236,6 +270,7 @@ GET  /admin/jobs
 POST /admin/register-webhooks
 POST /admin/retry-order/:orderId
 POST /admin/run-tracking
+POST /admin/mock-scan/:orderId   (TRACKON_MOCK=true only)
 ```
 
 ## Files

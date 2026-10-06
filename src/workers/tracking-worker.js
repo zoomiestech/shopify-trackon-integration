@@ -709,7 +709,11 @@ export async function runTrackingSyncOnce() {
       try {
         const raw =
           await trackTrackonAwb(
-            shipment.awb
+            shipment.awb,
+            {
+              mockScans:
+                shipment.mockScans,
+            }
           );
 
         const normalized =
