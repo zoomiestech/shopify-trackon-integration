@@ -1,6 +1,7 @@
 import axios from "axios";
 import crypto from "node:crypto";
 import { config } from "../config.js";
+import { bookingRejectionMessage } from "../lib/trackon-response.js";
 
 function text(value, max = 9999) {
   if (value === undefined || value === null) return "";
@@ -167,6 +168,13 @@ export async function createTrackonBooking(order) {
     data = response.data;
   }
 
+  const rejection = bookingRejectionMessage(data);
+  if (rejection) {
+    const err = new Error(rejection);
+    err.trackonResponse = data;
+    throw err;
+  }
+
   const awb = findAwbRecursive(data);
   if (!awb) {
     const err = new Error(
@@ -187,8 +195,9 @@ export async function trackTrackonAwb(awb) {
         CURRENT_STATUS: "MOCK - SHIPMENT BOOKED",
         CURRENT_CITY: "",
         TRACKING_CODE: "BOKN",
-        EVENTDATE: new Date().toISOString().slice(0, 10),
-        EVENTTIME: new Date().toTimeString().slice(0, 8),
+        // No scan time in mock mode, so polls do not add a history line each time.
+        EVENTDATE: "",
+        EVENTTIME: "",
         NDR_REASON: "",
       },
       lstDetails: [],

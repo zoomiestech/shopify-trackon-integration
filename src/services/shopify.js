@@ -312,6 +312,7 @@ export async function syncTrackingMetafields({
   city,
   trackingCode,
   awb,
+  history,
   shop = config.shopify.shop,
 }) {
   if (!config.shopify.syncTrackingMetafields) {
@@ -347,6 +348,7 @@ export async function syncTrackingMetafields({
       city,
       trackingCode,
       awb,
+      history,
     }),
   };
 
@@ -413,6 +415,53 @@ export async function addOrderTags({
   }
 
   return data.tagsAdd?.node || null;
+}
+
+export async function removeOrderTags({
+  orderGid,
+  tags,
+  shop = config.shopify.shop,
+}) {
+  const mutation = `
+    mutation BridgeOrderTagsRemove(
+      $id: ID!,
+      $tags: [String!]!
+    ) {
+      tagsRemove(
+        id: $id,
+        tags: $tags
+      ) {
+        node {
+          id
+        }
+
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const data = await shopifyGraphql(
+    mutation,
+    {
+      id: orderGid,
+      tags,
+    },
+    shop
+  );
+
+  const errors =
+    data.tagsRemove?.userErrors || [];
+
+  if (errors.length) {
+    throw new Error(
+      `Shopify tagsRemove error: ${JSON.stringify(errors)}`
+    );
+  }
+
+  return data.tagsRemove?.node || null;
 }
 
 export async function registerWebhook(

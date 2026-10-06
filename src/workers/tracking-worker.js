@@ -11,10 +11,31 @@ import {
 } from "../services/trackon.js";
 
 import {
+  addOrderTags,
+  removeOrderTags,
   createShopifyFulfillment,
   createShopifyFulfillmentEvent,
   syncTrackingMetafields,
 } from "../services/shopify.js";
+
+import {
+  normalizeCode,
+  trackingRows,
+  rowCode,
+  rowDateTime,
+} from "../lib/tracking-rows.js";
+
+import {
+  historyEntriesFromTracking,
+  mergeHistory,
+  renderHistory,
+} from "../lib/trackon-history.js";
+
+import {
+  desiredStatusTags,
+  statusTagChanges,
+  pendingAttemptedDeliveries,
+} from "../lib/tracking-status.js";
 
 let running = false;
 
@@ -50,47 +71,6 @@ const RTO_TERMINAL_CODES =
     "RHOD",
   ]);
 
-function normalizeCode(code) {
-  return String(code || "")
-    .trim()
-    .toUpperCase();
-}
-
-function trackingRows(tracking) {
-  const rows = [];
-
-  if (tracking) {
-    rows.push({
-      CURRENT_CITY:
-        tracking.city || "",
-
-      CURRENT_STATUS:
-        tracking.status || "",
-
-      EVENTDATE:
-        tracking.eventDate || "",
-
-      EVENTTIME:
-        tracking.eventTime || "",
-
-      TRACKING_CODE:
-        tracking.trackingCode || "",
-    });
-  }
-
-  if (
-    Array.isArray(
-      tracking?.details
-    )
-  ) {
-    rows.push(
-      ...tracking.details
-    );
-  }
-
-  return rows;
-}
-
 function findTrackingRowByCodes(
   tracking,
   codes
@@ -98,108 +78,7 @@ function findTrackingRowByCodes(
   return trackingRows(
     tracking
   ).find((row) =>
-    codes.has(
-      normalizeCode(
-        row?.TRACKING_CODE ||
-        row?.TrackingCode ||
-        row?.trackingCode
-      )
-    )
-  );
-}
-
-function hasTrackingCode(
-  tracking,
-  codes
-) {
-  return Boolean(
-    findTrackingRowByCodes(
-      tracking,
-      codes
-    )
-  );
-}
-
-function buildHappenedAt(
-  eventDate,
-  eventTime
-) {
-  if (!eventDate) {
-    return undefined;
-  }
-
-  const rawDate =
-    String(
-      eventDate
-    ).trim();
-
-  const rawTime =
-    String(
-      eventTime ||
-      "00:00:00"
-    ).trim();
-
-  const match =
-    rawDate.match(
-      /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/
-    );
-
-  if (match) {
-    const [
-      ,
-      dd,
-      mm,
-      yyyy,
-    ] = match;
-
-    const iso =
-      `${yyyy}-` +
-      `${mm.padStart(2, "0")}-` +
-      `${dd.padStart(2, "0")}T` +
-      `${rawTime || "00:00:00"}` +
-      "+05:30";
-
-    const date =
-      new Date(iso);
-
-    if (
-      !Number.isNaN(
-        date.getTime()
-      )
-    ) {
-      return date.toISOString();
-    }
-  }
-
-  const fallback =
-    new Date(
-      `${rawDate} ${rawTime}`
-    );
-
-  if (
-    !Number.isNaN(
-      fallback.getTime()
-    )
-  ) {
-    return fallback.toISOString();
-  }
-
-  return undefined;
-}
-
-function rowDateTime(row) {
-  if (!row) {
-    return undefined;
-  }
-
-  return buildHappenedAt(
-    row.EVENTDATE ||
-    row.EventDate ||
-    row.eventDate,
-
-    row.EVENTTIME ||
-    row.EventTime ||
-    row.eventTime
+    codes.has(rowCode(row))
   );
 }
 
@@ -477,6 +356,223 @@ async function createMilestoneEventOnce({
   }
 }
 
+/**
+ * One Shopify ATTEMPTED_DELIVERY event per failed delivery attempt
+ * (DNUB / DNUF / DNUA), with Trackon's reason. Each attempt is sent once;
+ * a failed send is retried on the next poll.
+ */
+async function sendAttemptedDeliveries(
+  shipment,
+  tracking
+) {
+  let sentKeys =
+    shipment.shopifyAttemptedDeliveryKeys ||
+    [];
+
+  for (
+    const attempt of pendingAttemptedDeliveries(
+      tracking,
+      sentKeys
+    )
+  ) {
+    try {
+      await createShopifyFulfillmentEvent({
+        fulfillmentId:
+          shipment.shopifyFulfillmentId,
+        status:
+          "ATTEMPTED_DELIVERY",
+        message:
+          attempt.message,
+        happenedAt:
+          attempt.happenedAt,
+        shop:
+          shipment.shop ||
+          config.shopify.shop,
+      });
+
+      sentKeys = [
+        ...sentKeys,
+        attempt.key,
+      ];
+
+      await upsertShipment(
+        shipment.orderId,
+        {
+          shopifyAttemptedDeliveryKeys:
+            sentKeys,
+        }
+      );
+
+      console.log(
+        `[tracking] Shopify ATTEMPTED_DELIVERY event created for order ${shipment.orderId}`
+      );
+    } catch (error) {
+      console.error(
+        `[tracking] Shopify ATTEMPTED_DELIVERY event failed for order ${shipment.orderId}`,
+        error?.response?.data ||
+        error
+      );
+
+      await upsertShipment(
+        shipment.orderId,
+        {
+          shopifyFulfillmentEventError:
+            String(
+              error?.message ||
+              error
+            ).slice(0, 5000),
+          shopifyFulfillmentEventErrorAt:
+            new Date().toISOString(),
+        }
+      );
+
+      break;
+    }
+  }
+
+  return {
+    ...shipment,
+    shopifyAttemptedDeliveryKeys:
+      sentKeys,
+  };
+}
+
+/**
+ * Keeps the trackon-pickup-failed / trackon-delivery-failed / trackon-rto
+ * tags in step with Trackon. Only tags we added are ever removed.
+ */
+async function syncStatusTags(
+  shipment,
+  tracking
+) {
+  if (!shipment.orderGid) {
+    return shipment;
+  }
+
+  const desired =
+    desiredStatusTags(tracking);
+
+  const { add, remove } =
+    statusTagChanges(
+      shipment.statusTags,
+      desired
+    );
+
+  if (
+    !add.length &&
+    !remove.length
+  ) {
+    return shipment;
+  }
+
+  const shop =
+    shipment.shop ||
+    config.shopify.shop;
+
+  try {
+    if (add.length) {
+      await addOrderTags({
+        orderGid:
+          shipment.orderGid,
+        tags: add,
+        shop,
+      });
+    }
+
+    if (remove.length) {
+      await removeOrderTags({
+        orderGid:
+          shipment.orderGid,
+        tags: remove,
+        shop,
+      });
+    }
+
+    await upsertShipment(
+      shipment.orderId,
+      {
+        statusTags:
+          desired,
+        shopifyStatusTagError:
+          null,
+      }
+    );
+
+    return {
+      ...shipment,
+      statusTags:
+        desired,
+    };
+  } catch (error) {
+    console.error(
+      `[tracking] Shopify status tag update failed for order ${shipment.orderId}`,
+      error?.response?.data ||
+      error
+    );
+
+    await upsertShipment(
+      shipment.orderId,
+      {
+        shopifyStatusTagError:
+          String(
+            error?.message ||
+            error
+          ).slice(0, 2000),
+      }
+    );
+
+    return shipment;
+  }
+}
+
+/**
+ * Adds every Trackon scan, plus our own steps, to the shipment's history.
+ * Older shipments booked before history existed get their booking line too.
+ */
+async function updateHistory(
+  shipment,
+  tracking
+) {
+  const ours = [];
+
+  if (shipment.bookingCreatedAt) {
+    ours.push({
+      key: "booked",
+      at: shipment.bookingCreatedAt,
+      text: `Booked with Trackon. AWB ${shipment.awb}. Waiting for pickup.`,
+    });
+  }
+
+  if (shipment.shopifyFulfillmentCreatedAt) {
+    ours.push({
+      key: "fulfilled",
+      at: shipment.shopifyFulfillmentCreatedAt,
+      text: "Pickup confirmed. Shopify order fulfilled and the customer emailed.",
+    });
+  }
+
+  const history =
+    mergeHistory(
+      shipment.history,
+      [
+        ...ours,
+        ...historyEntriesFromTracking(
+          tracking
+        ),
+      ]
+    );
+
+  await upsertShipment(
+    shipment.orderId,
+    { history }
+  );
+
+  return {
+    ...shipment,
+    history,
+  };
+}
+
 async function syncShopifyMilestones(
   shipment,
   tracking
@@ -540,6 +636,12 @@ async function syncShopifyMilestones(
       eventIdField:
         "shopifyOutForDeliveryEventId",
     });
+
+  current =
+    await sendAttemptedDeliveries(
+      current,
+      tracking
+    );
 
   current =
     await createMilestoneEventOnce({
@@ -663,6 +765,18 @@ export async function runTrackingSyncOnce() {
             normalized
           );
 
+        currentShipment =
+          await syncStatusTags(
+            currentShipment,
+            normalized
+          );
+
+        currentShipment =
+          await updateHistory(
+            currentShipment,
+            normalized
+          );
+
         if (
           currentShipment.orderGid &&
           config.shopify
@@ -684,6 +798,11 @@ export async function runTrackingSyncOnce() {
 
               awb:
                 currentShipment.awb,
+
+              history:
+                renderHistory(
+                  currentShipment.history
+                ),
 
               shop:
                 currentShipment.shop ||

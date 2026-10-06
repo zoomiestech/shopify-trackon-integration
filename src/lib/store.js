@@ -94,9 +94,10 @@ export async function completeJob(id) {
   return result.matchedCount > 0;
 }
 
+// Returns { final: true } once the job has used its last attempt.
 export async function failJob(id, error, retryDelaySeconds = 60) {
   const job = await Job.findOne({ jobId: id });
-  if (!job) return false;
+  if (!job) return { final: false };
 
   const maxAttempts = 5;
   job.error = String(error?.message || error || "Unknown job error");
@@ -109,7 +110,7 @@ export async function failJob(id, error, retryDelaySeconds = 60) {
   }
 
   await job.save();
-  return true;
+  return { final: job.status === "failed" };
 }
 
 export async function getShipment(orderId) {

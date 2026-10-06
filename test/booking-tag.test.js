@@ -98,3 +98,12 @@ test("shouldBookOrder needs the tag, an open order and no existing AWB", () => {
     false
   );
 });
+
+test("an order tagged trackon-booking-failed is not booked until staff remove that tag", () => {
+  const order = { tags: "book-trackon, trackon-booking-failed" };
+  assert.equal(shouldBookOrder({ order, shipment: null, tag: TAG }), false);
+  assert.equal(
+    shouldEnqueueOrderWebhook({ topic: "orders/updated", order, shipment: null, tag: TAG }),
+    false
+  );
+});

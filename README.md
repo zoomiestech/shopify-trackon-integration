@@ -33,6 +33,26 @@ and nothing stored in MongoDB. Each order is booked at most once; removing
 or re-adding the tag after booking does nothing, and nothing is cancelled
 at Trackon. The tag name is set by `TRACKON_BOOKING_TAG`.
 
+## What staff see in Shopify
+
+Shopify does not let apps write timeline comments, so each step is
+logged in the `trackon.history` order metafield (create the definition as
+**Multi-line text**), one line per step in India time: the booking, every
+Trackon scan with its reason, and the fulfillment.
+
+The service also manages these tags, so staff can filter the order list:
+
+| Tag | Meaning | Cleared when |
+|---|---|---|
+| `trackon-booked` | AWB created | never |
+| `trackon-booking-failed` | every booking attempt failed; reason in the history | staff fix the order and remove the tag, which books it again |
+| `trackon-pickup-failed` | latest Trackon status is PRSN | Trackon moves on |
+| `trackon-delivery-failed` | latest Trackon status is DNUB / DNUF / DNUA | Trackon moves on |
+| `trackon-rto` | the shipment is returning to origin | never |
+
+Each failed delivery attempt is also sent to Shopify as an
+"Attempted delivery" fulfillment event with Trackon's reason.
+
 ## Why MongoDB was added
 
 Render Free has an ephemeral filesystem. A local JSON file can disappear after a deploy/restart. That is unsafe for courier booking because losing an AWB mapping can lead to duplicate bookings.

@@ -7,10 +7,11 @@ const booking = {
   awb: "100272131666",
   shop: "test.myshopify.com",
   bookedTag: "trackon-booked",
+  history: "06/10/2026 13:58  Booked with Trackon. AWB 100272131666",
 };
 
 function recorder() {
-  const calls = { metafields: [], tags: [] };
+  const calls = { metafields: [], tags: [], removed: [] };
   return {
     calls,
     deps: {
@@ -20,11 +21,14 @@ function recorder() {
       addOrderTags: async (args) => {
         calls.tags.push(args);
       },
+      removeOrderTags: async (args) => {
+        calls.removed.push(args);
+      },
     },
   };
 }
 
-test("writes the AWB metafield and adds the booked tag", async () => {
+test("writes the AWB and history metafields and adds the booked tag", async () => {
   const { calls, deps } = recorder();
 
   const result = await publishBookingToShopify(booking, deps);
@@ -36,6 +40,7 @@ test("writes the AWB metafield and adds the booked tag", async () => {
       city: "",
       trackingCode: "",
       awb: "100272131666",
+      history: "06/10/2026 13:58  Booked with Trackon. AWB 100272131666",
       shop: "test.myshopify.com",
     },
   ]);
@@ -46,7 +51,22 @@ test("writes the AWB metafield and adds the booked tag", async () => {
       shop: "test.myshopify.com",
     },
   ]);
+  assert.deepEqual(calls.removed, []);
   assert.deepEqual(result, { ok: true, errors: [] });
+});
+
+test("removes tags it is asked to remove, such as an earlier booking failure", async () => {
+  const { calls, deps } = recorder();
+
+  await publishBookingToShopify({ ...booking, removeTags: ["trackon-booking-failed"] }, deps);
+
+  assert.deepEqual(calls.removed, [
+    {
+      orderGid: "gid://shopify/Order/1",
+      tags: ["trackon-booking-failed"],
+      shop: "test.myshopify.com",
+    },
+  ]);
 });
 
 test("a metafield failure does not stop the tag, and is reported", async () => {
@@ -62,16 +82,22 @@ test("a metafield failure does not stop the tag, and is reported", async () => {
   assert.deepEqual(result.errors, ["metafields: metafield boom"]);
 });
 
-test("a tag failure is reported and never thrown", async () => {
+test("tag failures are reported and never thrown", async () => {
   const { deps } = recorder();
   deps.addOrderTags = async () => {
     throw new Error("tag boom");
   };
+  deps.removeOrderTags = async () => {
+    throw new Error("remove boom");
+  };
 
-  const result = await publishBookingToShopify(booking, deps);
+  const result = await publishBookingToShopify(
+    { ...booking, removeTags: ["trackon-booking-failed"] },
+    deps
+  );
 
   assert.equal(result.ok, false);
-  assert.deepEqual(result.errors, ["tag: tag boom"]);
+  assert.deepEqual(result.errors, ["tag: tag boom", "remove tags: remove boom"]);
 });
 
 test("no tag is added when the booked tag is not configured", async () => {

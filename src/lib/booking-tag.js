@@ -18,9 +18,15 @@ export function hasBookingTag(order, tag) {
   return orderTags(order).includes(wanted);
 }
 
+// Added by the booking worker when every attempt failed. Staff fix the order
+// and remove this tag to retry; until then our own tag edits cannot start
+// another round of failing bookings.
+export const BOOKING_FAILED_TAG = "trackon-booking-failed";
+
 export function shouldBookOrder({ order, shipment, tag }) {
   return (
     hasBookingTag(order, tag) &&
+    !hasBookingTag(order, BOOKING_FAILED_TAG) &&
     !order?.cancelled_at &&
     !shipment?.awb
   );
