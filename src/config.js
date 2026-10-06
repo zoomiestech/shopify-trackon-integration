@@ -141,7 +141,7 @@ export const config = {
     pollMinutes:
       int(
         process.env.TRACKING_POLL_MINUTES,
-        60
+        15
       ),
 
     pickup: {

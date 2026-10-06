@@ -919,7 +919,7 @@ export function startTrackingWorker() {
         .pollMinutes
     );
 
-  setInterval(() => {
+  const run = () =>
     runTrackingSyncOnce().catch(
       (err) =>
         console.error(
@@ -927,5 +927,10 @@ export function startTrackingWorker() {
           err
         )
     );
-  }, minutes * 60 * 1000).unref();
+
+  // Poll once at startup, so a deploy or restart does not delay
+  // pickup and delivery updates by a full interval.
+  setImmediate(run);
+
+  setInterval(run, minutes * 60 * 1000).unref();
 }
