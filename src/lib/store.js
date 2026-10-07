@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { Job, Shipment, OauthState, OauthToken } from "./models.js";
+import { retryPlan } from "./job-retry.js";
 
 function plain(doc) {
   if (!doc) return null;
@@ -94,20 +95,24 @@ export async function completeJob(id) {
   return result.matchedCount > 0;
 }
 
-// Returns { final: true } once the job has used its last attempt.
-// An error marked permanent (retrying cannot fix it) fails the job at once.
-export async function failJob(id, error, retryDelaySeconds = 60) {
+// Returns { final: true } once the job will not be retried: its last
+// attempt is used, or the error is permanent. See lib/job-retry.js.
+export async function failJob(id, error) {
   const job = await Job.findOne({ jobId: id });
   if (!job) return { final: false };
 
-  const maxAttempts = 5;
   job.error = String(error?.message || error || "Unknown job error");
 
-  if (error?.permanent || (job.attempts || 0) >= maxAttempts) {
+  const plan = retryPlan({
+    attempts: job.attempts,
+    permanent: error?.permanent,
+  });
+
+  if (plan.final) {
     job.status = "failed";
   } else {
     job.status = "pending";
-    job.nextAttemptAt = new Date(Date.now() + retryDelaySeconds * 1000);
+    job.nextAttemptAt = new Date(Date.now() + plan.delaySeconds * 1000);
   }
 
   await job.save();

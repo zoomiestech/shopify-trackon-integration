@@ -23,6 +23,10 @@ import {
 } from "../lib/fulfil-shipment.js";
 
 import {
+  failureSummary,
+} from "../lib/job-retry.js";
+
+import {
   shouldBookOrder,
   bookingChoice,
   bookingTags,
@@ -445,12 +449,6 @@ async function reportFinalBookingFailure(
   const now =
     new Date().toISOString();
 
-  const reason =
-    String(
-      error?.message ||
-      error
-    ).slice(0, 300);
-
   const history =
     mergeHistory(
       shipment?.history,
@@ -459,9 +457,7 @@ async function reportFinalBookingFailure(
           key: `booking-failed:${now}`,
           at: now,
           text:
-            (error?.permanent
-              ? `Booking not attempted: ${reason}. `
-              : `Booking failed after ${job.attempts || 1} attempts: ${reason}. `) +
+            `${failureSummary(error, job.attempts)}. ` +
             `Fix the order, then remove the ${BOOKING_FAILED_TAG} tag to retry.`,
         },
       ]
@@ -584,12 +580,7 @@ export async function runBookingWorkerOnce() {
         await failJob(
           job.jobId ||
           job.id,
-          error,
-          Math.min(
-            60 *
-              (job.attempts || 1),
-            300
-          )
+          error
         );
 
       const orderId =

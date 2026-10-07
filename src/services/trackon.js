@@ -1,7 +1,7 @@
 import axios from "axios";
 import crypto from "node:crypto";
 import { config } from "../config.js";
-import { bookingRejectionMessage } from "../lib/trackon-response.js";
+import { bookingRejectionError } from "../lib/trackon-response.js";
 import { normalizeTrackonTracking } from "../lib/tracking-rows.js";
 import { buildMockTrackingResponse } from "../lib/mock-tracking.js";
 
@@ -175,11 +175,9 @@ export async function createTrackonBooking(order, { typeOfService } = {}) {
     data = response.data;
   }
 
-  const rejection = bookingRejectionMessage(data);
+  const rejection = bookingRejectionError(data);
   if (rejection) {
-    const err = new Error(rejection);
-    err.trackonResponse = data;
-    throw err;
+    throw rejection;
   }
 
   const awb = findAwbRecursive(data);

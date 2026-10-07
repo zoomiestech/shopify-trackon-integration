@@ -63,13 +63,24 @@ The service also manages these tags, so staff can filter the order list:
 | Tag | Meaning | Cleared when |
 |---|---|---|
 | `trackon-booked` | AWB created | never |
-| `trackon-booking-failed` | every booking attempt failed; reason in the history | staff fix the order and remove the tag, which books it again |
+| `trackon-booking-failed` | the booking failed; reason in the history (see below) | staff fix the order and remove the tag, which books it again |
 | `trackon-pickup-failed` | latest Trackon status is PRSN | Trackon moves on |
 | `trackon-delivery-failed` | latest Trackon status is DNUB / DNUF / DNUA | Trackon moves on |
 | `trackon-rto` | the shipment is returning to origin | never |
 
 Each failed delivery attempt is also sent to Shopify as an
 "Attempted delivery" fulfillment event with Trackon's reason.
+
+When a booking fails:
+
+| Failure | Attempts | `trackon-booking-failed` added |
+|---|---|---|
+| Trackon rejects it (`Status: false`, e.g. pincode not serviceable) | 1 | within seconds |
+| Both the `-air` and `-sf` tags on the order | 1 | within seconds |
+| Network error, timeout, Trackon 5xx | 3 (retries after 1 and 2 minutes) | about 3 minutes |
+
+Retries are few on purpose: if Trackon booked but its reply was lost,
+each retry risks a second AWB.
 
 ## Why MongoDB was added
 
