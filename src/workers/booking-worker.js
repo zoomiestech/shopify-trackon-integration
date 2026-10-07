@@ -14,8 +14,13 @@ import {
 import {
   addOrderTags,
   removeOrderTags,
+  createShopifyFulfillment,
   syncTrackingMetafields,
 } from "../services/shopify.js";
+
+import {
+  fulfilShipment,
+} from "../lib/fulfil-shipment.js";
 
 import {
   shouldBookOrder,
@@ -31,6 +36,7 @@ import {
 import {
   mergeHistory,
   renderHistory,
+  FULFILLED_HISTORY_TEXT,
 } from "../lib/trackon-history.js";
 
 let running = false;
@@ -107,17 +113,9 @@ async function processOrderBooking(job) {
     await getShipment(orderId);
 
   /**
-   * STEP 1:
-   * Create Trackon booking/AWB only.
-   *
-   * IMPORTANT:
-   * We intentionally DO NOT create the Shopify fulfillment here.
-   *
-   * An AWB being generated does not mean the physical parcel has
-   * been picked up by Trackon.
-   *
-   * The tracking worker waits for Trackon's PRSS
-   * (Pickup Closure - Successful / Pickup Successful).
+   * Book with Trackon, write the AWB to Shopify (metafields and tag),
+   * then fulfil the order with the tracking number and email the
+   * customer. Pickup is not waited for.
    */
   if (!shipment?.awb) {
     const choice =
@@ -159,7 +157,7 @@ async function processOrderBooking(job) {
           {
             key: "booked",
             at: bookedAt,
-            text: `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}. Waiting for pickup.`,
+            text: `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}.`,
           },
         ]
       );
@@ -184,7 +182,7 @@ async function processOrderBooking(job) {
           "",
 
         dispatchState:
-          "WAITING_FOR_PICKUP",
+          "BOOKED",
 
         bookingCreatedAt:
           bookedAt,
@@ -255,21 +253,113 @@ async function processOrderBooking(job) {
         }
       );
     }
-  }
 
-  /**
-   * Nothing else happens here.
-   *
-   * Shopify remains UNFULFILLED while Trackon has only created the AWB.
-   * It only gets the trackon.* metafields and the booked tag above.
-   *
-   * Later:
-   * Trackon PRSS
-   * -> tracking-worker.js
-   * -> create Shopify fulfillment
-   * -> notifyCustomer: true
-   * -> customer receives the dispatch/shipping email.
-   */
+    // With the AWB booked and in the metafields, fulfil the order with the
+    // tracking number and email the customer. If Shopify fails here, the
+    // tracking poll retries the fulfillment; the booking is not repeated.
+    const fulfil =
+      await fulfilShipment(
+        {
+          orderId,
+          orderGid,
+          awb:
+            booking.awb,
+          shop:
+            job.shop ||
+            config.shopify.shop,
+        },
+        {
+          createShopifyFulfillment,
+        }
+      );
+
+    if (fulfil.patch) {
+      await upsertShipment(
+        orderId,
+        fulfil.patch
+      );
+    }
+
+    if (fulfil.fulfilled) {
+      await recordFulfilledInHistory({
+        orderId,
+        orderGid,
+        awb:
+          booking.awb,
+        shop:
+          job.shop ||
+          config.shopify.shop,
+        history,
+        fulfilledAt:
+          fulfil.patch
+            .shopifyFulfillmentCreatedAt,
+      });
+
+      console.log(
+        `[booking] Order ${orderId} fulfilled with AWB ${booking.awb}; customer emailed`
+      );
+    } else if (fulfil.error) {
+      console.error(
+        `[booking] AWB ${booking.awb} saved, but the Shopify fulfillment failed for order ${orderId}; the tracking poll will retry`,
+        fulfil.error
+      );
+    }
+  }
+}
+
+async function recordFulfilledInHistory({
+  orderId,
+  orderGid,
+  awb,
+  shop,
+  history,
+  fulfilledAt,
+}) {
+  const updated =
+    mergeHistory(
+      history,
+      [
+        {
+          key: "fulfilled",
+          at: fulfilledAt,
+          text: FULFILLED_HISTORY_TEXT,
+        },
+      ]
+    );
+
+  await upsertShipment(
+    orderId,
+    { history: updated }
+  );
+
+  try {
+    await syncTrackingMetafields({
+      orderGid,
+      status:
+        "AWB_CREATED",
+      awb,
+      history:
+        renderHistory(updated),
+      shop,
+    });
+  } catch (error) {
+    console.error(
+      `[booking] Could not write the fulfilled history line to Shopify for order ${orderId}; the tracking poll will rewrite it`,
+      error?.response?.data ||
+      error
+    );
+
+    await upsertShipment(
+      orderId,
+      {
+        shopifyMetafieldSyncError:
+          String(
+            error?.message ||
+            error
+          ).slice(0, 2000),
+      }
+    );
+  }
 }
 
 async function processCancellation(

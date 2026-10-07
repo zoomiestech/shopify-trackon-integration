@@ -20,8 +20,8 @@
 - [ ] `/admin/shipments` does not contain it
 - [ ] `book-trackon` tag added to the order in Shopify Admin
 - [ ] `/admin/jobs` shows `orders/updated` done
-- [ ] `/admin/shipments` contains mock AWB with `dispatchState = WAITING_FOR_PICKUP`
-- [ ] Shopify order is still unfulfilled (fulfillment waits for Trackon PRSS)
+- [ ] `/admin/shipments` contains mock AWB with `dispatchState = FULFILLED`
+- [ ] Shopify order is fulfilled with the Trackon AWB and the shipping email arrived
 
 ## Persistence
 - [ ] Restart/redeploy Render

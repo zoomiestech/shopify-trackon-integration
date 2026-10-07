@@ -15,17 +15,15 @@ MongoDB-backed job queue
    ↓
 Trackon booking
    ↓
-AWB persisted in MongoDB (Shopify order stays unfulfilled)
+AWB persisted in MongoDB
    ↓
 trackon.awb metafield + `trackon-booked` tag written to the Shopify order
    ↓
-Trackon tracking polling
+Shopify fulfillment + tracking number + customer shipping email
    ↓
-Trackon PRSS (pickup successful)
+Trackon tracking polling (every 15 minutes)
    ↓
-Shopify fulfillment + tracking number + customer email
-   ↓
-Out for delivery / delivered events + optional Shopify metafields
+Out for delivery / attempted delivery / delivered events + metafields
 ```
 
 Orders without the tag are ignored completely: no booking, no fulfillment
@@ -156,7 +154,8 @@ orderId
 orderName
 awb
 trackingStatus = AWB_CREATED
-dispatchState = WAITING_FOR_PICKUP
+dispatchState = FULFILLED
+shopifyFulfillmentId
 ```
 
 The Shopify order gets the `trackon-booked` tag and the `trackon.awb`
@@ -165,8 +164,49 @@ order metafield definition for `trackon.awb` (Settings > Custom data >
 Orders). If this Shopify update fails, the booking still stands and the
 error is saved as `shopifyBookingPublishError` on the shipment.
 
-The order stays unfulfilled until Trackon reports PRSS. Then it is
-fulfilled with the Trackon tracking number and the customer is emailed.
+Straight after that, the order is fulfilled with the Trackon tracking
+number and link, and the customer gets Shopify's shipping email. Pickup is
+not waited for: pickup scans only appear in `trackon.history`. If the
+fulfillment call fails, the error is saved as `shopifyFulfillmentError`
+and the next tracking poll retries it; the booking is never repeated.
+
+If an order is cancelled after booking, staff must cancel the fulfillment
+in Shopify and the AWB with Trackon by hand.
+
+## Testing every tracking step in development
+
+With `TRACKON_MOCK=true`, fake Trackon scans can be added to a booked order.
+Mock tracking returns them in Trackon's live response shape, so the real
+tracking code handles them exactly as it would a courier's scans. The
+endpoint returns 404 when `TRACKON_MOCK` is not `true`.
+
+```bash
+curl -X POST "https://DEV-URL/admin/mock-scan/<orderId>?run=true" \
+  -H "x-admin-key: KEY" -H "Content-Type: application/json" \
+  -d '{"code": "DRSG"}'
+```
+
+`<orderId>` is the number in the Shopify order URL. `?run=true` polls at
+once and returns this order's result. Optional fields: `status` (the
+reason text, e.g. `"UNDELIVERED DUE TO DOOR LOCKED"`) and `city`. An
+unknown code is refused with the list of valid codes.
+
+Use your own email as the customer: real Shopify emails are sent.
+
+| Order | Send, in turn | Expect in Shopify |
+|---|---|---|
+| A, tagged `book-trackon-sf` | nothing | fulfilled with the AWB at once, shipping email |
+| | `PRSN` | `trackon-pickup-failed` tag, history line |
+| | `PRSS` | history line, pickup tag cleared |
+| | `DRSG` | "Out for delivery" event |
+| | `DNUB` with a `status` | "Attempted delivery" event, `trackon-delivery-failed` tag |
+| | `DDUB` | "Delivered" event, tag cleared, polling stops |
+| B, tagged `book-trackon-air` | `PRSS`, then `RSET` | `trackon-rto` tag |
+| | `RHOD` | polling stops |
+| C, tagged `book-trackon-air` and `book-trackon-sf` | nothing | `trackon-booking-failed` at once |
+
+Each step also adds a line to `trackon.history`. Scans sent after
+delivery or RHOD are stored but not polled.
 
 ## Persistence test
 
@@ -236,6 +276,7 @@ GET  /admin/jobs
 POST /admin/register-webhooks
 POST /admin/retry-order/:orderId
 POST /admin/run-tracking
+POST /admin/mock-scan/:orderId   (TRACKON_MOCK=true only)
 ```
 
 ## Files

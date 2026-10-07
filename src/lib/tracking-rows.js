@@ -104,3 +104,27 @@ export function rowDateTime(row) {
 
   return trackonEventTime(rowDate(row), rowTime(row));
 }
+
+export function normalizeTrackonTracking(data) {
+  // Trackon fills CustomersummaryTrack and leaves summaryTrack null for
+  // customer-code accounts like ours.
+  const summary =
+    data?.summaryTrack ||
+    data?.SummaryTrack ||
+    data?.CustomersummaryTrack ||
+    data?.CustomerSummaryTrack ||
+    data?.summary ||
+    {};
+  return {
+    awb: summary.AWBNO || summary.AWBNo || summary.awb || "",
+    status: summary.CURRENT_STATUS || summary.CurrentStatus || "",
+    city: summary.CURRENT_CITY || summary.CurrentCity || "",
+    trackingCode: summary.TRACKING_CODE || summary.TrackingCode || "",
+    eventDate: summary.EVENTDATE || "",
+    eventTime: summary.EVENTTIME || "",
+    ndrReason: summary.NDR_REASON || "",
+    details: data?.lstDetails || data?.LstDetails || data?.details || [],
+    responseStatus: data?.ResponseStatus || data?.responseStatus || null,
+    raw: data,
+  };
+}

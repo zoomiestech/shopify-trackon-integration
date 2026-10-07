@@ -13,8 +13,13 @@ import {
   listJobs,
   enqueueJob,
   getShipment,
+  upsertShipment,
   databaseCounts,
 } from "./lib/store.js";
+import {
+  buildMockScan,
+  MOCK_TRACK_CODES,
+} from "./lib/mock-tracking.js";
 import {
   buildInstallUrl,
   handleOauthCallback,
@@ -422,6 +427,97 @@ app.post(
         ...result,
       });
     } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Development only: add a fake Trackon scan to a booked order, so every
+// tracking step can be tested without a courier. ?run=true also polls now.
+app.post(
+  "/admin/mock-scan/:orderId",
+  requireAdmin,
+  async (req, res) => {
+    if (!config.trackon.mock) {
+      return res.status(404).json({
+        error:
+          "Mock scans are only available when TRACKON_MOCK=true.",
+      });
+    }
+
+    try {
+      const shipment =
+        await getShipment(
+          req.params.orderId
+        );
+
+      if (!shipment?.awb) {
+        return res.status(404).json({
+          error:
+            "No booked shipment (with an AWB) exists for this order ID.",
+        });
+      }
+
+      let scan;
+
+      try {
+        scan = buildMockScan({
+          code: req.body?.code,
+          status: req.body?.status,
+          city: req.body?.city,
+        });
+      } catch (error) {
+        return res.status(400).json({
+          error: error.message,
+          codes: MOCK_TRACK_CODES,
+        });
+      }
+
+      const mockScans = [
+        ...(shipment.mockScans || []),
+        scan,
+      ];
+
+      await upsertShipment(
+        shipment.orderId,
+        { mockScans }
+      );
+
+      let tracking = null;
+
+      if (req.query.run === "true") {
+        const result =
+          await runTrackingSyncOnce();
+
+        tracking = result.skipped
+          ? result
+          : (result.results || []).find(
+              (r) =>
+                r.orderId ===
+                shipment.orderId
+            ) || {
+              note:
+                "This shipment was not polled: it is delivered, returned or cancelled.",
+            };
+      }
+
+      res.json({
+        ok: true,
+        orderId: shipment.orderId,
+        awb: shipment.awb,
+        scan,
+        scanCount: mockScans.length,
+        tracking,
+      });
+    } catch (error) {
+      console.error(
+        "Mock scan error",
+        error
+      );
+
       res.status(500).json({
         ok: false,
         error: error.message,

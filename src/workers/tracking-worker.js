@@ -29,7 +29,12 @@ import {
   historyEntriesFromTracking,
   mergeHistory,
   renderHistory,
+  FULFILLED_HISTORY_TEXT,
 } from "../lib/trackon-history.js";
+
+import {
+  fulfilShipment,
+} from "../lib/fulfil-shipment.js";
 
 import {
   desiredStatusTags,
@@ -40,19 +45,13 @@ import {
 let running = false;
 
 /**
- * Trackon status mapping used in this integration.
- *
- * PRSS = Pickup Closure - Successful / Pickup Successful
+ * Trackon status mapping used in this integration. The order is fulfilled
+ * at booking, so pickup scans (PRSG / PRSS) only appear in the history.
  *
  * DRSG / DRSF = Out for Delivery
  *
  * DDUB / DDUF / DDUA = Delivered
  */
-const PICKUP_SUCCESS_CODES =
-  new Set([
-    "PRSS",
-  ]);
-
 const OUT_FOR_DELIVERY_CODES =
   new Set([
     "DRSG",
@@ -136,110 +135,49 @@ function shouldPollShipment(
 }
 
 /**
- * Creates the Shopify fulfillment ONLY after Trackon confirms pickup success.
- *
- * This is the dispatch point for the Shopify customer journey.
+ * The booking worker fulfils the order right after booking. This retries
+ * it for any shipment where that Shopify call failed. Pickup is not
+ * waited for.
  */
-async function ensureFulfillmentAfterPickup(
-  shipment,
-  tracking
+async function ensureFulfillment(
+  shipment
 ) {
-  if (
-    shipment.shopifyFulfillmentId
-  ) {
-    return shipment;
-  }
-
-  const pickupRow =
-    findTrackingRowByCodes(
-      tracking,
-      PICKUP_SUCCESS_CODES
+  const result =
+    await fulfilShipment(
+      {
+        ...shipment,
+        shop:
+          shipment.shop ||
+          config.shopify.shop,
+      },
+      {
+        createShopifyFulfillment,
+      }
     );
 
-  if (!pickupRow) {
+  if (!result.patch) {
     return shipment;
   }
-
-  if (
-    !shipment.orderGid
-  ) {
-    throw new Error(
-      `Cannot create Shopify fulfillment for order ${shipment.orderId}: orderGid is missing.`
-    );
-  }
-
-  const fulfillment =
-    await createShopifyFulfillment({
-      orderGid:
-        shipment.orderGid,
-
-      awb:
-        shipment.awb,
-
-      shop:
-        shipment.shop ||
-        config.shopify.shop,
-
-      // This is intentionally TRUE here.
-      // The customer receives the Shopify dispatch/shipping email
-      // only after Trackon PRSS confirms pickup success.
-      notifyCustomer:
-        true,
-    });
-
-  const now =
-    new Date().toISOString();
-
-  const pickupAt =
-    rowDateTime(
-      pickupRow
-    ) || now;
-
-  const patch = {
-    shopifyFulfillmentId:
-      fulfillment.id,
-
-    shopifyFulfillmentStatus:
-      fulfillment.status,
-
-    shopifyFulfillmentCreatedAt:
-      now,
-
-    pickupConfirmedAt:
-      pickupAt,
-
-    pickupTrackingCode:
-      normalizeCode(
-        pickupRow.TRACKING_CODE ||
-        pickupRow.TrackingCode ||
-        pickupRow.trackingCode
-      ),
-
-    dispatchState:
-      "DISPATCHED_AFTER_PICKUP",
-
-    dispatchNotificationRequestedAt:
-      now,
-
-    shopifyFulfillmentError:
-      null,
-
-    lastError:
-      null,
-  };
 
   await upsertShipment(
     shipment.orderId,
-    patch
+    result.patch
   );
 
-  console.log(
-    `[tracking] Pickup confirmed; Shopify fulfillment created for order ${shipment.orderId}`
-  );
+  if (result.fulfilled) {
+    console.log(
+      `[tracking] Shopify fulfillment created on retry for order ${shipment.orderId}; customer emailed`
+    );
+  } else {
+    console.error(
+      `[tracking] Shopify fulfillment retry failed for order ${shipment.orderId}`,
+      result.error
+    );
+  }
 
   return {
     ...shipment,
-    ...patch,
+    ...result.patch,
   };
 }
 
@@ -539,7 +477,7 @@ async function updateHistory(
     ours.push({
       key: "booked",
       at: shipment.bookingCreatedAt,
-      text: `Booked with Trackon. AWB ${shipment.awb}. Waiting for pickup.`,
+      text: `Booked with Trackon. AWB ${shipment.awb}.`,
     });
   }
 
@@ -547,7 +485,7 @@ async function updateHistory(
     ours.push({
       key: "fulfilled",
       at: shipment.shopifyFulfillmentCreatedAt,
-      text: "Pickup confirmed. Shopify order fulfilled and the customer emailed.",
+      text: FULFILLED_HISTORY_TEXT,
     });
   }
 
@@ -580,17 +518,10 @@ async function syncShopifyMilestones(
   let current =
     shipment;
 
-  /**
-   * First create the actual Shopify fulfillment only after PRSS.
-   *
-   * We inspect both the current summary AND lstDetails.
-   * This matters if polling sees a later status but the Trackon history
-   * still contains the earlier PRSS pickup-success scan.
-   */
+  // Normally already fulfilled at booking; this only retries a failure.
   current =
-    await ensureFulfillmentAfterPickup(
-      current,
-      tracking
+    await ensureFulfillment(
+      current
     );
 
   if (
@@ -709,7 +640,11 @@ export async function runTrackingSyncOnce() {
       try {
         const raw =
           await trackTrackonAwb(
-            shipment.awb
+            shipment.awb,
+            {
+              mockScans:
+                shipment.mockScans,
+            }
           );
 
         const normalized =
@@ -848,7 +783,7 @@ export async function runTrackingSyncOnce() {
 
           dispatchState:
             currentShipment.dispatchState ||
-            "WAITING_FOR_PICKUP",
+            "BOOKED",
         });
       } catch (error) {
         await upsertShipment(

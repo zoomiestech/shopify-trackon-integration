@@ -191,8 +191,8 @@ export async function createShopifyFulfillment({
         },
       ],
 
-      // For the Trackon flow this is passed as true only after
-      // Trackon confirms pickup success (PRSS).
+      // The Trackon flow passes true right after booking, so the
+      // customer gets Shopify's shipping email with the AWB.
       notifyCustomer:
         Boolean(notifyCustomer),
 
