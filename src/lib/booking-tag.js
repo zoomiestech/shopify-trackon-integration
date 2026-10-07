@@ -1,7 +1,8 @@
 // Trackon is booked only for orders that staff tag in Shopify Admin.
 // Untagged orders are left alone: no booking, no fulfillment, no record.
 // The tag also picks Trackon's TypeOfService: <tag>-air for Air, and
-// <tag>-sf or the plain <tag> for SF (surface).
+// <tag>-sf or the plain <tag> for Surface. Trackon's live API accepts only
+// "Air" or "Surface" (error 506), not the "SF" its booking PDF mentions.
 
 function normalizeTag(value) {
   return String(value || "").trim().toLowerCase();
@@ -40,7 +41,7 @@ export function bookingChoice(order, tag) {
 
   if (air && sf) return { book: true, typeOfService: null, conflict: true };
   if (air) return { book: true, typeOfService: "Air", conflict: false };
-  if (sf || plain) return { book: true, typeOfService: "SF", conflict: false };
+  if (sf || plain) return { book: true, typeOfService: "Surface", conflict: false };
   return none;
 }
 

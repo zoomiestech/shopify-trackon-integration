@@ -7,7 +7,7 @@ Version 2 replaces the old `data/store.json` persistence with MongoDB Atlas.
 ```text
 Shopify order
    ↓
-staff add a booking tag in Shopify Admin (see "Choosing Air or SF" below)
+staff add a booking tag in Shopify Admin (see "Choosing Air or Surface" below)
    ↓
 verified Shopify webhook (orders/create or orders/updated)
    ↓
@@ -31,7 +31,7 @@ and nothing stored in MongoDB. Each order is booked at most once; removing
 or re-adding the tag after booking does nothing, and nothing is cancelled
 at Trackon. The tag name is set by `TRACKON_BOOKING_TAG`.
 
-## Choosing Air or SF
+## Choosing Air or Surface
 
 Trackon's `TypeOfService` is chosen per order by the booking tag, not by an
 environment variable:
@@ -39,8 +39,11 @@ environment variable:
 | Tag | TypeOfService |
 |---|---|
 | `book-trackon-air` | `Air` |
-| `book-trackon-sf` | `SF` (surface) |
-| `book-trackon` | `SF` (surface) |
+| `book-trackon-sf` | `Surface` |
+| `book-trackon` | `Surface` |
+
+Trackon's live API accepts only `Air` or `Surface` (it rejects `SF` with
+error 506, although its booking PDF lists "Air/SF/PT").
 
 An order with both `book-trackon-air` and `book-trackon-sf` is not booked:
 it gets the `trackon-booking-failed` tag at once and the reason in

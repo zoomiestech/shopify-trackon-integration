@@ -24,5 +24,5 @@ const sampleOrder = {
   ]
 };
 
-const result = await createTrackonBooking(sampleOrder, { typeOfService: "SF" });
+const result = await createTrackonBooking(sampleOrder, { typeOfService: "Surface" });
 console.log(JSON.stringify(result, null, 2));

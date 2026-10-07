@@ -213,7 +213,7 @@ export function validateBaseConfig() {
 
   if (process.env.TRACKON_TYPE_OF_SERVICE) {
     errors.push(
-      "TRACKON_TYPE_OF_SERVICE is no longer used; Air or SF is chosen per order with the booking tag"
+      "TRACKON_TYPE_OF_SERVICE is no longer used; Air or Surface is chosen per order with the booking tag"
     );
   }
 

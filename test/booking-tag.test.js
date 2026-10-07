@@ -118,9 +118,9 @@ test("bookingTags lists the plain, SF and Air tags", () => {
   });
 });
 
-test("the plain tag and the SF tag book by surface", () => {
-  assert.deepEqual(bookingChoice({ tags: "book-trackon" }, TAG), { book: true, typeOfService: "SF", conflict: false });
-  assert.deepEqual(bookingChoice({ tags: "Book-Trackon-SF" }, TAG), { book: true, typeOfService: "SF", conflict: false });
+test("the plain tag and the SF tag book as Surface, the value Trackon accepts", () => {
+  assert.deepEqual(bookingChoice({ tags: "book-trackon" }, TAG), { book: true, typeOfService: "Surface", conflict: false });
+  assert.deepEqual(bookingChoice({ tags: "Book-Trackon-SF" }, TAG), { book: true, typeOfService: "Surface", conflict: false });
 });
 
 test("the Air tag books by air, even next to the plain tag", () => {

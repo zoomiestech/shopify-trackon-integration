@@ -37,9 +37,9 @@ function itemDescription(order) {
   return text(titles || "Shopify order", 100);
 }
 
-// typeOfService (Air or SF) comes from the order's booking tag.
+// typeOfService (Air or Surface) comes from the order's booking tag.
 export function mapShopifyOrderToTrackon(order, { typeOfService } = {}) {
-  if (!typeOfService) throw new Error("Trackon TypeOfService (Air or SF) is missing.");
+  if (!typeOfService) throw new Error("Trackon TypeOfService (Air or Surface) is missing.");
 
   const addr = order.shipping_address;
   if (!addr) throw new Error("Shopify order has no shipping address.");
