@@ -16,6 +16,9 @@ import {
 const MAX_ENTRIES = 100;
 const DEFAULT_LINES = 50;
 
+export const FULFILLED_HISTORY_TEXT =
+  "Shopify order fulfilled with the AWB and tracking link. Customer emailed.";
+
 const istFormat = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Kolkata",
   day: "2-digit",
