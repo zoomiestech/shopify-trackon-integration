@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { safeError } from "../lib/safe-error.js";
 import {
   leaseNextJob,
   completeJob,
@@ -23,7 +24,7 @@ import {
 } from "../lib/fulfil-shipment.js";
 
 import {
-  failureSummary,
+  failureHistoryLine,
 } from "../lib/job-retry.js";
 
 import {
@@ -151,163 +152,195 @@ async function processOrderBooking(job) {
         }
       );
 
-    const bookedAt =
-      new Date().toISOString();
+    await finishBooking({
+      orderId,
+      orderGid,
+      shop:
+        job.shop ||
+        config.shopify.shop,
+      awb:
+        booking.awb,
+      shipment,
+      typeOfService:
+        choice.typeOfService,
+      historyText:
+        `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}.`,
+      extraPatch: {
+        trackonBookingPayload:
+          booking.payload,
+        trackonBookingResponse:
+          booking.response,
+      },
+    });
+  }
+}
 
-    const history =
-      mergeHistory(
-        shipment?.history,
-        [
-          {
-            key: "booked",
-            at: bookedAt,
-            text: `Booked with Trackon (${choice.typeOfService}). AWB ${booking.awb}.`,
-          },
-        ]
-      );
+/**
+ * Everything after Trackon has given an AWB: save it, write the trackon.*
+ * metafields, history and trackon-booked tag, then fulfil the order with
+ * the tracking number and email the customer. Used by normal bookings and
+ * by POST /admin/attach-awb for bookings Trackon made but never confirmed.
+ */
+export async function finishBooking({
+  orderId,
+  orderGid,
+  shop,
+  awb,
+  shipment,
+  typeOfService,
+  historyText,
+  extraPatch = {},
+  removeFailedTag = false,
+}) {
+  const bookedAt =
+    new Date().toISOString();
+
+  const history =
+    mergeHistory(
+      shipment?.history,
+      [
+        {
+          key: "booked",
+          at: bookedAt,
+          text: historyText,
+        },
+      ]
+    );
+
+  await upsertShipment(
+    orderId,
+    {
+      ...extraPatch,
+
+      awb,
+
+      // Do not fake a BOKN/dispatch state at AWB creation time.
+      trackingStatus:
+        "AWB_CREATED",
+
+      trackingCode:
+        "",
+
+      dispatchState:
+        "BOOKED",
+
+      bookingCreatedAt:
+        bookedAt,
+
+      typeOfService:
+        typeOfService,
+
+      history,
+
+      lastError:
+        null,
+    }
+  );
+
+  // Show the AWB in Shopify Admin now, without fulfilling the order.
+  const published =
+    await publishBookingToShopify(
+      {
+        orderGid,
+        awb:
+          awb,
+        shop:
+          shop,
+        bookedTag:
+          config.shopify.bookedTag,
+        history:
+          renderHistory(history),
+        removeTags:
+          removeFailedTag ||
+          shipment?.bookingFailedTaggedAt
+            ? [BOOKING_FAILED_TAG]
+            : [],
+      },
+      {
+        syncTrackingMetafields,
+        addOrderTags,
+        removeOrderTags,
+      }
+    );
+
+  if (published.ok) {
+    await upsertShipment(
+      orderId,
+      {
+        shopifyBookingPublishedAt:
+          new Date().toISOString(),
+        shopifyBookingPublishError:
+          null,
+        bookingFailedTaggedAt:
+          null,
+      }
+    );
+  } else {
+    console.error(
+      `[booking] AWB ${awb} saved, but Shopify update failed for order ${orderId}`,
+      published.errors
+    );
 
     await upsertShipment(
       orderId,
       {
-        awb:
-          booking.awb,
-
-        trackonBookingPayload:
-          booking.payload,
-
-        trackonBookingResponse:
-          booking.response,
-
-        // Do not fake a BOKN/dispatch state at AWB creation time.
-        trackingStatus:
-          "AWB_CREATED",
-
-        trackingCode:
-          "",
-
-        dispatchState:
-          "BOOKED",
-
-        bookingCreatedAt:
-          bookedAt,
-
-        typeOfService:
-          choice.typeOfService,
-
-        history,
-
-        lastError:
-          null,
+        shopifyBookingPublishError:
+          published.errors
+            .join("; ")
+            .slice(0, 5000),
+        shopifyBookingPublishErrorAt:
+          new Date().toISOString(),
       }
     );
+  }
 
-    // Show the AWB in Shopify Admin now, without fulfilling the order.
-    const published =
-      await publishBookingToShopify(
-        {
-          orderGid,
-          awb:
-            booking.awb,
-          shop:
-            job.shop ||
-            config.shopify.shop,
-          bookedTag:
-            config.shopify.bookedTag,
-          history:
-            renderHistory(history),
-          removeTags:
-            shipment?.bookingFailedTaggedAt
-              ? [BOOKING_FAILED_TAG]
-              : [],
-        },
-        {
-          syncTrackingMetafields,
-          addOrderTags,
-          removeOrderTags,
-        }
-      );
-
-    if (published.ok) {
-      await upsertShipment(
-        orderId,
-        {
-          shopifyBookingPublishedAt:
-            new Date().toISOString(),
-          shopifyBookingPublishError:
-            null,
-          bookingFailedTaggedAt:
-            null,
-        }
-      );
-    } else {
-      console.error(
-        `[booking] AWB ${booking.awb} saved, but Shopify update failed for order ${orderId}`,
-        published.errors
-      );
-
-      await upsertShipment(
-        orderId,
-        {
-          shopifyBookingPublishError:
-            published.errors
-              .join("; ")
-              .slice(0, 5000),
-          shopifyBookingPublishErrorAt:
-            new Date().toISOString(),
-        }
-      );
-    }
-
-    // With the AWB booked and in the metafields, fulfil the order with the
-    // tracking number and email the customer. If Shopify fails here, the
-    // tracking poll retries the fulfillment; the booking is not repeated.
-    const fulfil =
-      await fulfilShipment(
-        {
-          orderId,
-          orderGid,
-          awb:
-            booking.awb,
-          shop:
-            job.shop ||
-            config.shopify.shop,
-        },
-        {
-          createShopifyFulfillment,
-        }
-      );
-
-    if (fulfil.patch) {
-      await upsertShipment(
-        orderId,
-        fulfil.patch
-      );
-    }
-
-    if (fulfil.fulfilled) {
-      await recordFulfilledInHistory({
+  // With the AWB booked and in the metafields, fulfil the order with the
+  // tracking number and email the customer. If Shopify fails here, the
+  // tracking poll retries the fulfillment; the booking is not repeated.
+  const fulfil =
+    await fulfilShipment(
+      {
         orderId,
         orderGid,
         awb:
-          booking.awb,
+          awb,
         shop:
-          job.shop ||
-          config.shopify.shop,
-        history,
-        fulfilledAt:
-          fulfil.patch
-            .shopifyFulfillmentCreatedAt,
-      });
+          shop,
+      },
+      {
+        createShopifyFulfillment,
+      }
+    );
 
-      console.log(
-        `[booking] Order ${orderId} fulfilled with AWB ${booking.awb}; customer emailed`
-      );
-    } else if (fulfil.error) {
-      console.error(
-        `[booking] AWB ${booking.awb} saved, but the Shopify fulfillment failed for order ${orderId}; the tracking poll will retry`,
-        fulfil.error
-      );
-    }
+  if (fulfil.patch) {
+    await upsertShipment(
+      orderId,
+      fulfil.patch
+    );
+  }
+
+  if (fulfil.fulfilled) {
+    await recordFulfilledInHistory({
+      orderId,
+      orderGid,
+      awb:
+        awb,
+      shop:
+        shop,
+      history,
+      fulfilledAt:
+        fulfil.patch
+          .shopifyFulfillmentCreatedAt,
+    });
+
+    console.log(
+      `[booking] Order ${orderId} fulfilled with AWB ${awb}; customer emailed`
+    );
+  } else if (fulfil.error) {
+    console.error(
+      `[booking] AWB ${awb} saved, but the Shopify fulfillment failed for order ${orderId}; the tracking poll will retry`,
+      fulfil.error
+    );
   }
 }
 
@@ -349,8 +382,7 @@ async function recordFulfilledInHistory({
   } catch (error) {
     console.error(
       `[booking] Could not write the fulfilled history line to Shopify for order ${orderId}; the tracking poll will rewrite it`,
-      error?.response?.data ||
-      error
+      safeError(error)
     );
 
     await upsertShipment(
@@ -457,8 +489,11 @@ async function reportFinalBookingFailure(
           key: `booking-failed:${now}`,
           at: now,
           text:
-            `${failureSummary(error, job.attempts)}. ` +
-            `Fix the order, then remove the ${BOOKING_FAILED_TAG} tag to retry.`,
+            failureHistoryLine(
+              error,
+              job.attempts,
+              BOOKING_FAILED_TAG
+            ),
         },
       ]
     );
@@ -498,8 +533,7 @@ async function reportFinalBookingFailure(
   } catch (reportError) {
     console.error(
       `[booking] Could not report the booking failure to Shopify for order ${orderId}`,
-      reportError?.response?.data ||
-      reportError
+      safeError(reportError)
     );
 
     await upsertShipment(
@@ -572,8 +606,7 @@ export async function runBookingWorkerOnce() {
     } catch (error) {
       console.error(
         `[job ${job.jobId || job.id}] failed`,
-        error?.response?.data ||
-        error
+        safeError(error)
       );
 
       const { final } =
@@ -628,7 +661,7 @@ export function startBookingWorker() {
       (err) =>
         console.error(
           "booking worker loop error",
-          err
+          safeError(err)
         )
     );
   }, 2000).unref();

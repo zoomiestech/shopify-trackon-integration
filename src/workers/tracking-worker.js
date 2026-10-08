@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { safeError } from "../lib/safe-error.js";
 
 import {
   listShipments,
@@ -285,8 +286,7 @@ async function createMilestoneEventOnce({
 
     console.error(
       `[tracking] Shopify ${status} event failed for order ${shipment.orderId}`,
-      error?.response?.data ||
-      error
+      safeError(error)
     );
 
     // Keep the sentAt marker unset so the next poll retries.
@@ -347,8 +347,7 @@ async function sendAttemptedDeliveries(
     } catch (error) {
       console.error(
         `[tracking] Shopify ATTEMPTED_DELIVERY event failed for order ${shipment.orderId}`,
-        error?.response?.data ||
-        error
+        safeError(error)
       );
 
       await upsertShipment(
@@ -444,8 +443,7 @@ async function syncStatusTags(
   } catch (error) {
     console.error(
       `[tracking] Shopify status tag update failed for order ${shipment.orderId}`,
-      error?.response?.data ||
-      error
+      safeError(error)
     );
 
     await upsertShipment(
@@ -859,7 +857,7 @@ export function startTrackingWorker() {
       (err) =>
         console.error(
           "tracking worker loop error",
-          err
+          safeError(err)
         )
     );
 

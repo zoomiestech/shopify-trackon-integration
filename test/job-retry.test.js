@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_JOB_ATTEMPTS, retryPlan, failureSummary } from "../src/lib/job-retry.js";
+import { MAX_JOB_ATTEMPTS, retryPlan, failureSummary, failureHistoryLine } from "../src/lib/job-retry.js";
 
 test("a failing job gets 3 attempts in all", () => {
   assert.equal(MAX_JOB_ATTEMPTS, 3);
@@ -39,4 +39,24 @@ test("a permanent problem found before calling Trackon says it was not attempted
 
 test("a retried failure says how many attempts were made", () => {
   assert.equal(failureSummary(new Error("timeout of 15000ms exceeded"), 3), "Booking failed after 3 attempts: timeout of 15000ms exceeded");
+});
+
+test("the history line tells staff to retry by removing the failed tag", () => {
+  assert.equal(
+    failureHistoryLine(new Error("timeout"), 3, "trackon-booking-failed"),
+    "Booking failed after 3 attempts: timeout. Fix the order, then remove the trackon-booking-failed tag to retry."
+  );
+});
+
+test("a possibly-booked failure warns against retrying and points to attach-awb", () => {
+  const error = Object.assign(
+    new Error("Trackon did not answer in time (timeout). It may already be booked: check the Trackon portal for ref #8375"),
+    { permanent: true, possiblyBooked: true }
+  );
+
+  assert.equal(
+    failureHistoryLine(error, 1, "trackon-booking-failed"),
+    "Trackon did not answer in time (timeout). It may already be booked: check the Trackon portal for ref #8375. " +
+      "If it was booked, attach its AWB instead of retrying; removing the trackon-booking-failed tag books it again."
+  );
 });

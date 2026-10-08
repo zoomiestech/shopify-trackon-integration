@@ -1,7 +1,7 @@
 import axios from "axios";
 import crypto from "node:crypto";
 import { config } from "../config.js";
-import { bookingRejectionError } from "../lib/trackon-response.js";
+import { bookingRejectionError, bookingNoReplyError } from "../lib/trackon-response.js";
 import { normalizeTrackonTracking } from "../lib/tracking-rows.js";
 import { buildMockTrackingResponse } from "../lib/mock-tracking.js";
 
@@ -159,20 +159,25 @@ export async function createTrackonBooking(order, { typeOfService } = {}) {
   assertRealCredentials();
 
   let data;
-  if (config.trackon.bookingBodyMode === "form") {
-    const body = new URLSearchParams();
-    for (const [key, value] of Object.entries(payload)) body.set(key, value ?? "");
-    const response = await axios.post(config.trackon.bookingUrl, body, {
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      timeout: config.trackon.timeoutMs,
-    });
-    data = response.data;
-  } else {
-    const response = await axios.post(config.trackon.bookingUrl, payload, {
-      headers: { "Content-Type": "application/json" },
-      timeout: config.trackon.timeoutMs,
-    });
-    data = response.data;
+  try {
+    if (config.trackon.bookingBodyMode === "form") {
+      const body = new URLSearchParams();
+      for (const [key, value] of Object.entries(payload)) body.set(key, value ?? "");
+      const response = await axios.post(config.trackon.bookingUrl, body, {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: config.trackon.timeoutMs,
+      });
+      data = response.data;
+    } else {
+      const response = await axios.post(config.trackon.bookingUrl, payload, {
+        headers: { "Content-Type": "application/json" },
+        timeout: config.trackon.timeoutMs,
+      });
+      data = response.data;
+    }
+  } catch (error) {
+    // No answer: Trackon may have booked it anyway, so never retry.
+    throw bookingNoReplyError(error, payload.RefNo) || error;
   }
 
   const rejection = bookingRejectionError(data);

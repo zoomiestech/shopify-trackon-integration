@@ -80,10 +80,35 @@ When a booking fails:
 |---|---|---|
 | Trackon rejects it (`Status: false`, e.g. pincode not serviceable) | 1 | within seconds |
 | Both the `-air` and `-sf` tags on the order | 1 | within seconds |
-| Network error, timeout, Trackon 5xx | 3 (retries after 1 and 2 minutes) | about 3 minutes |
+| Trackon does not answer (timeout, connection dropped) | 1 | as soon as the wait runs out |
+| Trackon unreachable (connection refused, DNS) or Trackon 5xx | 3 (retries after 1 and 2 minutes) | about 3 minutes |
 
-Retries are few on purpose: if Trackon booked but its reply was lost,
-each retry risks a second AWB.
+A timeout is never retried: the request reached Trackon, which may have
+booked it anyway (order #8375 was booked although the call timed out).
+Raise `TRACKON_TIMEOUT_MS` (in milliseconds) if Trackon is often slow.
+
+### When Trackon booked but did not confirm
+
+The history says "Trackon did not answer in time … check the Trackon
+portal for ref #…". Do **not** remove `trackon-booking-failed`: that books
+it again. Find the docket in the Trackon portal (cancel any duplicates),
+then attach its AWB:
+
+```bash
+curl -X POST "https://SERVICE-URL/admin/attach-awb/<orderId>" \
+  -H "x-admin-key: KEY" -H "Content-Type: application/json" \
+  -d '{"awb": "500664884543", "typeOfService": "Surface"}'
+```
+
+This finishes the order exactly like a normal booking: AWB saved,
+`trackon.awb` and history written, `trackon-booked` added,
+`trackon-booking-failed` removed, the order fulfilled and the customer
+emailed, then tracked. `typeOfService` is optional and only recorded. It
+refuses an AWB that is not 10 to 15 digits, an order the service never
+tried to book, an order that already has an AWB, and a cancelled order.
+
+Errors are logged without the request: no Trackon credentials, Shopify
+token or customer details reach the logs.
 
 ## Why MongoDB was added
 
@@ -290,6 +315,7 @@ GET  /admin/jobs
 POST /admin/register-webhooks
 POST /admin/retry-order/:orderId
 POST /admin/run-tracking
+POST /admin/attach-awb/:orderId
 POST /admin/mock-scan/:orderId   (TRACKON_MOCK=true only)
 ```
 

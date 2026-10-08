@@ -19,7 +19,9 @@ export function retryPlan({ attempts, permanent } = {}) {
 export function failureSummary(error, attempts) {
   const reason = String(error?.message || error).slice(0, 300);
 
-  if (error?.trackonResponse && error.permanent) {
+  // Trackon's own answer, or our no-reply message, already says what
+  // happened.
+  if (error?.permanent && (error.trackonResponse || error.possiblyBooked)) {
     return reason;
   }
 
@@ -28,4 +30,13 @@ export function failureSummary(error, attempts) {
   }
 
   return `Booking failed after ${attempts || 1} attempts: ${reason}`;
+}
+
+// The full history line, with what staff should do next.
+export function failureHistoryLine(error, attempts, failedTag) {
+  const advice = error?.possiblyBooked
+    ? `If it was booked, attach its AWB instead of retrying; removing the ${failedTag} tag books it again.`
+    : `Fix the order, then remove the ${failedTag} tag to retry.`;
+
+  return `${failureSummary(error, attempts)}. ${advice}`;
 }

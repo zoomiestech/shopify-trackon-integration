@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { config, validateBaseConfig } from "./config.js";
 import { connectMongo, mongoStatus } from "./lib/mongodb.js";
 import { verifyShopifyWebhook } from "./lib/hmac.js";
+import { safeError } from "./lib/safe-error.js";
 import {
   shouldEnqueueOrderWebhook,
   bookingTags,
@@ -31,7 +32,9 @@ import {
 import {
   runBookingWorkerOnce,
   startBookingWorker,
+  finishBooking,
 } from "./workers/booking-worker.js";
+import { attachAwbProblem } from "./lib/attach-awb.js";
 import {
   runTrackingSyncOnce,
   startTrackingWorker,
@@ -116,12 +119,12 @@ app.post(
       });
 
       setImmediate(() =>
-        runBookingWorkerOnce().catch(console.error)
+        runBookingWorkerOnce().catch((err) => console.error("booking worker error", safeError(err)))
       );
     } catch (error) {
       console.error(
         "Webhook handler error",
-        error
+        safeError(error)
       );
 
       res.status(500).json({
@@ -224,7 +227,7 @@ app.get(
     } catch (error) {
       console.error(
         "OAuth callback error",
-        error
+        safeError(error)
       );
       res.status(400).send(error.message);
     }
@@ -402,8 +405,8 @@ app.post(
     });
 
     setImmediate(() =>
-      runBookingWorkerOnce().catch(
-        console.error
+      runBookingWorkerOnce().catch((err) =>
+        console.error("booking worker error", safeError(err))
       )
     );
 
@@ -427,6 +430,102 @@ app.post(
         ...result,
       });
     } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Attaches the AWB of a booking Trackon made but never confirmed (for
+// example after a timeout), then finishes it like a normal booking:
+// metafields, history, trackon-booked tag, fulfillment and customer email.
+// Body: { "awb": "500664884543", "typeOfService": "Surface" (optional) }.
+app.post(
+  "/admin/attach-awb/:orderId",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const shipment =
+        await getShipment(
+          req.params.orderId
+        );
+
+      const problem =
+        attachAwbProblem({
+          awb: req.body?.awb,
+          shipment,
+        });
+
+      if (problem) {
+        return res.status(400).json({
+          ok: false,
+          error: problem,
+        });
+      }
+
+      const awb =
+        String(req.body.awb).trim();
+
+      const typeOfService =
+        ["Air", "Surface", "SF"].includes(
+          req.body?.typeOfService
+        )
+          ? req.body.typeOfService
+          : null;
+
+      await finishBooking({
+        orderId:
+          shipment.orderId,
+        orderGid:
+          shipment.orderGid,
+        shop:
+          shipment.shop ||
+          config.shopify.shop,
+        awb,
+        shipment,
+        typeOfService,
+        historyText:
+          `AWB ${awb} attached by hand: Trackon booked it but did not confirm in time.`,
+        extraPatch: {
+          awbAttachedByHandAt:
+            new Date().toISOString(),
+        },
+        removeFailedTag:
+          true,
+      });
+
+      const updated =
+        await getShipment(
+          shipment.orderId
+        );
+
+      res.json({
+        ok: true,
+        orderId:
+          updated.orderId,
+        awb:
+          updated.awb,
+        dispatchState:
+          updated.dispatchState,
+        fulfilled:
+          Boolean(
+            updated.shopifyFulfillmentId
+          ),
+        shopifyBookingPublishError:
+          updated.shopifyBookingPublishError ||
+          null,
+        shopifyFulfillmentError:
+          updated.shopifyFulfillmentError ||
+          null,
+      });
+    } catch (error) {
+      console.error(
+        "Attach AWB error",
+        safeError(error)
+      );
+
       res.status(500).json({
         ok: false,
         error: error.message,
@@ -515,7 +614,7 @@ app.post(
     } catch (error) {
       console.error(
         "Mock scan error",
-        error
+        safeError(error)
       );
 
       res.status(500).json({
@@ -529,7 +628,7 @@ app.post(
 app.use((err, req, res, next) => {
   console.error(
     "Unhandled Express error",
-    err
+    safeError(err)
   );
 
   res.status(500).json({
